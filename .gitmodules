@@ -1,0 +1,6 @@
+[submodule "resources"]
+	path = resources
+	url = git@gitlab.fhnw.ch:deep_learning/sgds/trainingscenter.git
+[submodule "trainingscenter"]
+	path = trainingscenter
+	url = git@gitlab.fhnw.ch:deep_learning/sgds/resources.git
