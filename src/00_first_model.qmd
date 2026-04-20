@@ -1,13 +1,22 @@
 ---
-title: 'Mini-Challenge DEL: Hyperparameter Tuning und Model Evaluation'
+title: DEL - Mini Challenge
+author: Luca Manna
+date: '2026-04-17'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
 jupyter: python3
 ---
 
+# Mini-Challenge DEL: Hyperparameter Tuning und Model Evaluation
 
 **Task:** Bildklassifikation mit dem Intel Image Classification Dataset (6 Klassen: buildings, forest, glacier, mountain, sea, street).
 
 **Stage 1:** Basismodell mit CNN, LR- und Batch-Size-Tuning, Cross-Validation.
-
 
 ## Imports und Setup
 
@@ -18,14 +27,17 @@ Alle benötigten Bibliotheken: PyTorch, torchvision, HuggingFace datasets, sciki
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import seaborn as sns
 
 # PyTorch
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as transforms
+from torch.utils.data import TensorDataset
 
 # HuggingFace datasets
 from datasets import load_dataset, load_from_disk
@@ -39,6 +51,7 @@ import wandb
 
 # Utilities
 import os
+import time
 from pathlib import Path
 
 # GLobal variables
@@ -101,6 +114,19 @@ plt.tight_layout()
 plt.show()
 ```
 
+### Fazit Klassenverteilung
+
+Sowohl das Train als auch das Test Datafram hat eine ausgewogene Klassenverteilung. Es benötigt keine Oversampling oder Undersampling einer Klasse.
+
+- Train Dataset: 
+  - Die `mountain` Klasse hat am meisten Vorkommnisse mit knapp unter 2500 Bilder. 
+  - Die `buildings` Klasse und die `sea` Klasse haben am wenigsten ausprägungen mit ca. 2200 ausprägungen.
+- Test Dataset:
+  - Die `glacier` Klasse hat am meisten ausprägungen mit ca. 560 Bilder.
+  - Die `buildings` Klasse hat am wenigsten ausprägungen mit 440 Bildern. 
+
+Bei der Evaluation von dem Modellen werde ich beachten ob die kleineren Klassendichten bei `buildings` und `sea` einen Einfluss auf deren Performance haben durch Klassenbezogene Metriken (Precicion, Recall und F1). 
+
 ### Beispielbilder
 
 Je 2 Beispielbilder pro Klasse zur visuellen Inspektion.
@@ -123,68 +149,142 @@ plt.tight_layout()
 plt.show()
 ```
 
+### Fazit Beispielbilder pro Klasse
+
+Meine vorhersage für die Modelle ist: 
+- Die Klasse `forest` wird wahrscheinlich am einfachstenzu unterscheiden sein. 
+- Die Klassen `buildings` und `street` könnten Problematisch zu unterscheiden sein. Bei dem ersten Beispielbild von `street` sieht man auch Gebäude was schwer zu unterscheiden sein kann für das Modell.
+- Auch die Klassen `glacier` und `mountain` können schwer vorhersagbar sein für das Modell, da bei den `glacier` Beispielbildern auch Berge zu sehen sind. 
+- Bei dem ersten Beispielbild von `sea` ist zu erkennen, dass der Datensatz auch Schwarz-Weiss Bilder enthält. Das Modell kann sich somit nicht lediglich auf die Farbkanäle verlassen. 
+
 ### Bildgrössen und Pixelwerte
 
 Prüfen, ob alle Bilder die gleiche Grösse haben und wie der Wertebereich aussieht.
 
 ```{python}
-# Bildgrössen prüfen
-sample_sizes = [dataset["train"][i]["image"].size for i in range(500)]
-unique_sizes = set(sample_sizes)
-print(f"Einzigartige Bildgrössen (erste 500 Bilder): {unique_sizes}")
+# Bildgrössen in allen Splits prüfen
+train_sizes = [dataset["train"][i]["image"].size for i in range(len(dataset["train"]))]
+test_sizes = [dataset["test"][i]["image"].size for i in range(len(dataset["test"]))]
+
+unique_train_sizes = set(train_sizes)
+unique_test_sizes = set(test_sizes)
+
+print(f"Einzigartige Bildgrössen im Train-Split: {unique_train_sizes}")
+print(f"Einzigartige Bildgrössen im Test-Split:  {unique_test_sizes}")
 
 sample_img = dataset["train"][0]["image"]
 img_array = np.array(sample_img)
-print(f"Shape eines Bildes: {img_array.shape}")
+print(f"\nShape eines Beispielbildes: {img_array.shape}")
 print(f"Wertebereich: [{img_array.min()}, {img_array.max()}]")
 print(f"Dtype: {img_array.dtype}")
 ```
 
-### Pixelwert-Verteilung pro Kanal
+### Fazit Bildgrössen
 
-Boxplot der mittleren Pixelwerte pro RGB-Kanal über eine Stichprobe von 200 Bildern.
+Die Bilddimensionen sind in der Höhe immer 150 pixel. In der Breite variieren die Bilder jedoch. Im Trainings Datensatz ist die Bildbreite zwischen 81 pixel und 150 pixel. Im Test Datensatz sind die Bildbreiten zwischen 72 pixel und 150 pixeln. 
+
+Dies muss bei dem Preprocessing Berücksichtigt werden. 
+
+### Pixelwert-Verteilung pro Kanal pro Klasse
+
+Boxplot der mittleren Pixelwerte pro RGB-Kanal, aufgeschlüsselt nach Klasse (je 200 Bilder pro Klasse). So lässt sich erkennen, ob bestimmte Klassen systematisch andere Farbverteilungen aufweisen.
 
 ```{python}
-# Pixelwert-Verteilung pro Kanal (Stichprobe von 200 Bildern)
+# Pixelwert-Verteilung pro Kanal pro Klasse
 rng = np.random.default_rng(RANDOM_SEED)
-sample_indices = rng.choice(len(dataset["train"]), size=200, replace=False)
-pixel_data = {c: [] for c in ["R", "G", "B"]}
+n_samples_per_class = 200
+all_labels = dataset["train"]["label"]
 
-for idx in sample_indices:
-    img = np.array(dataset["train"][int(idx)]["image"])
-    for c, name in enumerate(["R", "G", "B"]):
-        pixel_data[name].append(img[:, :, c].mean())
-
-fig, ax = plt.subplots(figsize=(8, 4))
-ax.boxplot(
-    [pixel_data["R"], pixel_data["G"], pixel_data["B"]], labels=["Rot", "Grün", "Blau"]
+fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+fig.suptitle(
+    "Mittlere Pixelwerte pro Kanal pro Klasse (Stichprobe n=200 je Klasse)", fontsize=14
 )
-ax.set_title("Mittlere Pixelwerte pro Kanal (Stichprobe n=200)")
-ax.set_ylabel("Pixelwert (0–255)")
+
+summary = {}
+
+for class_idx, class_name in enumerate(label_names):
+    ax = axes[class_idx // 3, class_idx % 3]
+
+    class_indices = [i for i, lbl in enumerate(all_labels) if lbl == class_idx]
+    sample_indices = rng.choice(
+        class_indices, size=min(n_samples_per_class, len(class_indices)), replace=False
+    )
+
+    pixel_data = {"R": [], "G": [], "B": []}
+    for idx in sample_indices:
+        img = np.array(dataset["train"][int(idx)]["image"])
+        for c, name in enumerate(["R", "G", "B"]):
+            pixel_data[name].append(img[:, :, c].mean())
+
+    summary[class_name] = pixel_data
+
+    bp = ax.boxplot(
+        [pixel_data["R"], pixel_data["G"], pixel_data["B"]],
+        tick_labels=["Rot", "Grün", "Blau"],
+        patch_artist=True,
+    )
+    colors = ["#FF6B6B", "#51CF66", "#339AF0"]
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax.set_title(class_name, fontsize=12)
+    ax.set_ylabel("Pixelwert (0–255)")
+    ax.set_ylim(0, 255)
+
 plt.tight_layout()
 plt.show()
 
-print(
-    f"Kanal-Mittelwerte (0–255):  R={np.mean(pixel_data['R']):.1f},  G={np.mean(pixel_data['G']):.1f},  B={np.mean(pixel_data['B']):.1f}"
-)
-print(
-    f"Kanal-Mittelwerte (0–1):    R={np.mean(pixel_data['R'])/255:.3f},  G={np.mean(pixel_data['G'])/255:.3f},  B={np.mean(pixel_data['B'])/255:.3f}"
-)
+# Zusammenfassung: Mittelwerte pro Klasse und Kanal
+print(f"\n{'Klasse':<12} {'R':>8} {'G':>8} {'B':>8}")
+print("-" * 38)
+for class_name, data in summary.items():
+    print(
+        f"{class_name:<12} {np.mean(data['R']):>8.1f} {np.mean(data['G']):>8.1f} {np.mean(data['B']):>8.1f}"
+    )
 ```
+
+### Fazit der mittleren Farbkanalwerte pro Klasse
+**Beobachtungen:**
+
+- `forest` ist die am einfachsten unterscheidbare Klasse: Sie hat die niedrigste Gesamthelligkeit und eine Grün Dominanz. Der blaue Kanal ist mit 60.7 der niedrigste Wert im gesamten Datensatz.
+- `glacier`, `mountain` und `sea` bilden ein problematisches Cluster. Alle drei Klassen sind blau dominant und liegen in der Gesamthelligkeit nahe beieinander. Die Farbinformation allein reicht hier nicht aus, um zuverlässig zwischen diesen Klassen zu unterscheiden.
+- `buildings` zeigt ein nahezu perfekt neutrales Farbprofil. Rot, Grün und Blau sind sehr ausgeglichen. 
+- `street` ist ebenfalls relativ ausgeglichen, wobei rot am dominantesten ist. Die `street` Pixelverteilung ist dazu noch leicht tiefer (dünkler) als die `buildings` Pixelwerte
+
+**Implikationen für das Modell:**
+
+1. **Farbinformation ist notwendig, aber nicht hinreichend.** Während Forest anhand der Farbverteilung gut trennbar ist, muss das CNN für die Unterscheidung von Glacier/Mountain/Sea auf **Textur- und Strukturmerkmale** (Kanten, Muster, räumliche Frequenzen) zurückgreifen. Das zeigt, wie wichtig die Convolutional Layers sind.
+2. **Normalisierung ist wichtig.** Die Mittelwerte weichen deutlich von 128 (Mitte des [0, 255]-Bereichs) ab und unterscheiden sich zwischen den Kanälen. Eine kanalweise Normalisierung (z.B. mit den berechneten Mittelwerten und Standardabweichungen) hilft dem Modell, schneller zu konvergieren, da die Eingabedaten zentriert und skaliert werden.
+3. **Verwechslungsrisiken** sind vorhersehbar: Die Confusion Matrix wird vermutlich erhöhte Verwechslungsraten zwischen Glacier ↔ Mountain ↔ Sea sowie zwischen Buildings ↔ Street zeigen. Dies haben ich bereits in den Beispielbildern zum Teil vorhergesagt. 
 
 ## Preprocessing
 
-### Kanal-Statistiken berechnen
+### Train/Validation-Split und Kanal-Statistiken berechnen
 
-Berechnung der Mittelwerte und Standardabweichungen pro RGB-Kanal über das gesamte Trainingsset. Diese werden für die Normalisierung der Bilder verwendet.
+Zuerst wird der Train/Validation-Split (80/20, stratifiziert) durchgeführt. Danach werden Mittelwerte und Standardabweichungen pro RGB-Kanal **ausschliesslich über den Trainings-Split** berechnet, nicht über den gesamten Datensatz, um Data Leakage zu vermeiden.
+
+Der Validation Split entsteht aus 20% von den vorgegebenen trainings Datensatz. 
+- `train`:        80% von dem **Train** Datensatz
+- `validation`:   20% von dem **Train** Datensatz
+- `test`:         100% von dem **Test** Datensatz
 
 ```{python}
-# Kanal-Mittelwerte und Standardabweichungen berechnen (über gesamtes Trainingsset)
+# Train/Validation-Split zuerst, damit Kanal-Statistiken nur auf Trainingsdaten berechnet werden
+train_indices, val_indices = train_test_split(
+    range(len(dataset["train"])),
+    test_size=0.2,
+    random_state=RANDOM_SEED,
+    stratify=dataset["train"]["label"],
+)
+
+# Kanal-Mittelwerte und Standardabweichungen NUR über den Train-Split berechnen
+# Validation- und Test-Daten dürfen nicht einfliessen (Data Leakage)
 channel_sum = np.zeros(3)
 channel_sq_sum = np.zeros(3)
 n_pixels = 0
 
-for i in range(len(dataset["train"])):
+for i in train_indices:
     img = np.array(dataset["train"][i]["image"], dtype=np.float32) / 255.0
     channel_sum += img.sum(axis=(0, 1))
     channel_sq_sum += (img**2).sum(axis=(0, 1))
@@ -193,30 +293,43 @@ for i in range(len(dataset["train"])):
 channel_mean = channel_sum / n_pixels
 channel_std = np.sqrt(channel_sq_sum / n_pixels - channel_mean**2)
 
-print(f"Channel means: {channel_mean}")
-print(f"Channel stds:  {channel_std}")
+print(f"Train-Split: {len(train_indices)} Bilder, Val-Split: {len(val_indices)} Bilder")
+print(f"Channel means (nur Train-Split): {channel_mean}")
+print(f"Channel stds  (nur Train-Split): {channel_std}")
 ```
 
 ### Transform-Pipeline
 
-RandomCrop (64x64) für Training: Aus den ~150x150 Bildern wird pro Aufruf ein zufälliger 64x64-Ausschnitt genommen — das wirkt als Data Augmentation.
-CenterCrop (64x64) für Validation/Test: Deterministisch den mittleren Ausschnitt für konsistente Evaluation.
+**Train Pipeline**
+- `RandomResizedCrop` (64x64) für Training: Aus den ~150x150 Bildern wird pro Aufruf ein zufälliger 64x64-Ausschnitt genommen. Der Ausschnitt darf zwischen 40% und 100% gross sein. Das wirkt als Data Augmentation.
+- `RandomHorizontalFlip` Die Bilder werden mit einer Wahrscheinlichkeit von 50% Horizontal geflipped. Das macht das Modell robuster. 
+- `ToTensor` wandelt die Bilder von einem PIL-Bild zu einem PyTorch-Tensor um. Dabei wird:
+  - Wertebereich von 0–255 auf 0–1 skaliert
+  - Format wird von HWC (64, 64, 3) zu CHW (3, 64, 64) geändert
+- `Normalize` Hier werden die Pixelwerte pro Farbkanal normalisiert.
+  - $x_{neu} = \frac{x - \text{mean}}{\text{std}}$
+
+**Validation und Test Pipeline**
+- `Resize` (64x64): Das gesamte Bild wird auf 64x64 herunter skaliert, damit keine Bildinformation durch Cropping verloren geht und die Evaluation auf dem vollständigen Bildinhalt basiert.
 
 ```{python}
 # Train: RandomResizedCrop + HorizontalFlip als Data Augmentation
 transform_train = transforms.Compose(
     [
-        transforms.RandomResizedCrop(64, scale=(0.4, 1.0)),
+        transforms.RandomResizedCrop(
+            64, scale=(0.4, 1.0)
+        ),  # TODO Fragen ob bei Etappe bereits erlaubt ist.
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),  # PIL -> Tensor [0,1], HWC -> CHW
         transforms.Normalize(mean=channel_mean.tolist(), std=channel_std.tolist()),
     ]
 )
 
+
 # Validation/Test: CenterCrop für deterministische Evaluation
 transform_eval = transforms.Compose(
     [
-        transforms.CenterCrop(64),  # Mittlerer 64x64 Ausschnitt
+        transforms.Resize((64, 64)),  # Beide Dimensionen auf 64x64 erzwingen
         transforms.ToTensor(),
         transforms.Normalize(mean=channel_mean.tolist(), std=channel_std.tolist()),
     ]
@@ -250,17 +363,10 @@ class IntelImageDataset(torch.utils.data.Dataset):
 
 ### Train/Validation/Test-Split
 
-80/20-Split des Trainingssets in Train und Validation (stratifiziert nach Klasse). Das Testset bleibt unverändert.
+train_indices und val_indices wurden bereits oben erstellt (80/20, stratifiziert). Hier werden die HuggingFace-Subsets und PyTorch Datasets daraus erzeugt. Das Testset bleibt unverändert.
 
 ```{python}
-# Train/Validation-Split (80/20, stratifiziert nach Klasse)
-train_indices, val_indices = train_test_split(
-    range(len(dataset["train"])),
-    test_size=0.2,
-    random_state=42,
-    stratify=dataset["train"]["label"],
-)
-
+# train_indices und val_indices wurden oben bei der Kanal-Statistik-Berechnung erstellt
 hf_train = dataset["train"].select(train_indices)
 hf_val = dataset["train"].select(val_indices)
 
@@ -293,6 +399,8 @@ print(f"Pixel range:  [{images.min():.2f}, {images.max():.2f}]")
 ```
 
 ## Schritt 1: Setup (Device, Metriken, W&B)
+
+Als Kostenfunktion (Loss-Funktion) wird `CrossEntropyLoss` verwendet. `CrossEntropyLoss` wird verwendet, weil das Modell Bilder mehreren möglichen Klassen zuordnen soll, wobei jedes Bild genau eine richtige Klasse besitzt. Die Funktion misst, wie gut die Vorhersage des Modells mit dem tatsächlichen Klassenlabel übereinstimmt, und eignet sich deshalb gut für Multiclass-Classification.
 
 ```{python}
 # Device Setup (Apple Silicon MPS / CUDA / CPU)
@@ -378,6 +486,7 @@ def train_model(
 ):
     """Kompletter Trainingsloop mit optionalem W&B-Logging. Gibt History-Dict zurück."""
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    start_time = time.time()
 
     for epoch in range(epochs):
         train_loss, train_acc = train_epoch(
@@ -405,11 +514,17 @@ def train_model(
             f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f}"
         )
 
+    elapsed = time.time() - start_time
+    minutes, seconds = divmod(elapsed, 60)
+    print(
+        f"\nTraining abgeschlossen in {int(minutes)}m {seconds:.1f}s ({epochs} Epochen, {elapsed/epochs:.2f}s/Epoche)"
+    )
+
     return history
 
 
 def plot_training(history, title="Lernkurven"):
-    """Plottet Loss und Accuracy (Train vs Val)."""
+    """Plottet Loss und Accuracy (Train vs Val). Gibt die Figure zurück."""
     epochs = range(len(history["train_loss"]))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -432,6 +547,419 @@ def plot_training(history, title="Lernkurven"):
 
     plt.tight_layout()
     plt.show()
+    return fig
+```
+
+### Evaluierungs- und Visualisierungsfunktionen
+
+- **Lernkurven** (Train Loss / Val Loss / Train Accuracy / Val Accuracy): wie sich das Modell über die Epochen entwickelt.
+- **Generalization Gap**: zeigt direkt den Unterschied zwischen Trainings- und Validierungsleistung.
+- **Confusion Matrix**: Sie zeigt für jede Klasse:
+  - wie oft sie korrekt erkannt wurde
+  - mit welchen anderen Klassen sie verwechselt wurde
+- **Per-Class Metrics**: Balkendiagramm pro Klasse mit folgenden Werten:
+  - Precision
+  - Recall
+  - F1-Score
+- **Top-Loss Samples**: Zeigt die Beispiele bei denen das Modell die grössten Schwierigkeiten hatte.
+- **Cross-Validation Boxplot**: wie stabil das Modell über verschiedene Folds hinweg performt.
+
+```{python}
+def denormalize(tensor, mean, std):
+    """Denormalisiert einen Bild-Tensor für die Anzeige."""
+    mean = torch.tensor(mean, dtype=torch.float32).view(3, 1, 1)
+    std = torch.tensor(std, dtype=torch.float32).view(3, 1, 1)
+    return (tensor * std + mean).clamp(0, 1)
+
+
+def collect_predictions(model, loader, device):
+    """Sammelt Bilder, Predictions, Labels und Per-Sample-Losses vom gesamten Loader."""
+    model.eval()
+    all_images, all_labels, all_preds, all_probs, all_losses = [], [], [], [], []
+    with torch.no_grad():
+        for X, Y in loader:
+            X, Y = X.to(device), Y.to(device)
+            logits = model(X)
+            probs = torch.softmax(logits, dim=1)
+            losses = F.cross_entropy(logits, Y, reduction="none")
+            all_images.append(X.cpu())
+            all_labels.append(Y.cpu())
+            all_preds.append(logits.argmax(dim=1).cpu())
+            all_probs.append(probs.cpu())
+            all_losses.append(losses.cpu())
+    return {
+        "images": torch.cat(all_images),
+        "y_true": torch.cat(all_labels).numpy(),
+        "y_pred": torch.cat(all_preds).numpy(),
+        "y_probs": torch.cat(all_probs).numpy(),
+        "losses": torch.cat(all_losses).numpy(),
+    }
+
+
+def plot_cv_boxplot(fold_results, title="Cross-Validation Accuracy"):
+    """Box-Plot und Einzelwerte der Cross-Validation Ergebnisse."""
+    best_accs = [r["best_val_acc"] for r in fold_results]
+    final_accs = [r["final_val_acc"] for r in fold_results]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bp = ax.boxplot(
+        [best_accs, final_accs],
+        tick_labels=["Best Val Acc", "Final Val Acc"],
+        patch_artist=True,
+        widths=0.5,
+    )
+    bp["boxes"][0].set_facecolor("#2196F3")
+    bp["boxes"][0].set_alpha(0.6)
+    bp["boxes"][1].set_facecolor("#FF9800")
+    bp["boxes"][1].set_alpha(0.6)
+
+    for i, data in enumerate([best_accs, final_accs], 1):
+        ax.scatter([i] * len(data), data, color="black", zorder=5, s=50)
+        for j, val in enumerate(data):
+            ax.annotate(f"  Fold {j + 1}", (i, val), fontsize=8, va="center")
+
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def evaluate_model(
+    model,
+    loader,
+    class_names,
+    device,
+    mean,
+    std,
+    top_n_loss=16,
+    log_wandb=True,
+):
+    """Sammelt Predictions und loggt alle Rohdaten zu W&B, damit Confusion Matrix,
+    Per-Class Metrics und Top-Loss Samples im W&B-Report interaktiv dargestellt werden.
+    Erzeugt keine Plots im Notebook."""
+    results = collect_predictions(model, loader, device)
+    y_true = results["y_true"]
+    y_pred = results["y_pred"]
+
+    report = classification_report(
+        y_true, y_pred, target_names=class_names, output_dict=True
+    )
+    acc = float(np.mean(y_true == y_pred))
+
+    if log_wandb and wandb.run is not None:
+        # Confusion Matrix — native interaktiv via wandb.plot.confusion_matrix
+        wandb.log(
+            {
+                "eval/confusion_matrix": wandb.plot.confusion_matrix(
+                    y_true=y_true, preds=y_pred, class_names=class_names
+                )
+            }
+        )
+
+        # Drei separate native Bar-Charts via wandb.plot.bar.
+        # Enthalten alle Klassen + macro/weighted avg als Summary-Rows.
+        groups = list(class_names) + ["macro avg", "weighted avg"]
+        bar_panels = {}
+        for metric, panel_key, title in [
+            ("precision", "eval/per_class_precision", "Per-Class Precision"),
+            ("recall", "eval/per_class_recall", "Per-Class Recall"),
+            ("f1-score", "eval/per_class_f1", "Per-Class F1-Score"),
+        ]:
+            tbl = wandb.Table(
+                columns=["class", metric],
+                data=[[g, float(report[g][metric])] for g in groups],
+            )
+            bar_panels[panel_key] = wandb.plot.bar(tbl, "class", metric, title=title)
+        wandb.log(bar_panels)
+
+        # Classification Report als flache Tabelle (für Detail-Ansicht im Report)
+        wandb.log(
+            {
+                "eval/classification_report": wandb.Table(
+                    columns=["class", "precision", "recall", "f1-score", "support"],
+                    data=[
+                        [
+                            name,
+                            report[name]["precision"],
+                            report[name]["recall"],
+                            report[name]["f1-score"],
+                            int(report[name]["support"]),
+                        ]
+                        for name in class_names
+                    ],
+                ),
+                "eval/accuracy": acc,
+            }
+        )
+
+        # Top-Loss Samples als Table mit Bildern → sortierbares Panel im Report
+        top_idx = np.argsort(results["losses"])[-top_n_loss:][::-1]
+        top_loss_table = wandb.Table(
+            columns=["image", "true", "pred", "confidence", "loss"]
+        )
+        for idx in top_idx:
+            img = (
+                denormalize(results["images"][idx], mean, std).permute(1, 2, 0).numpy()
+            )
+            top_loss_table.add_data(
+                wandb.Image(img),
+                class_names[int(y_true[idx])],
+                class_names[int(y_pred[idx])],
+                float(results["y_probs"][idx][int(y_pred[idx])]),
+                float(results["losses"][idx]),
+            )
+        wandb.log({"eval/top_loss_samples": top_loss_table})
+
+    print(f"\nGesamtgenauigkeit: {acc:.4f}")
+    print(classification_report(y_true, y_pred, target_names=class_names))
+
+    return results
+```
+
+### Hyperparameter-Vergleichs-Visualisierungen
+
+- **Vergleichsplot für Loss und Accuracy**: zeigt, wie sich verschiedene Hyperparameterwerte über die Epochen hinweg auf Trainings- und Validierungsleistung auswirken.
+- **Beste Validation Accuracy pro Hyperparameterwert**: Balkendiagramm, das den besten erreichten Validierungswert pro getesteter Konfiguration darstellt.
+- **Generalization Gap im Hyperparametervergleich**: zeigt für verschiedene Hyperparameterwerte den Unterschied zwischen Validierungs- und Trainings-Loss und hilft, Overfitting zu erkennen.
+
+```{python}
+def plot_hp_comparison(histories, hp_name="hp", hp_label="Hyperparameter"):
+    """Vergleichsplot: Train (solid) + Val (gestrichelt) fuer Loss und Accuracy."""
+    colors = plt.cm.tab10(np.linspace(0, 0.8, len(histories)))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    for (hp_val, hist), color in zip(histories.items(), colors):
+        epochs = range(len(hist["train_loss"]))
+        ax1.plot(
+            epochs,
+            hist["train_loss"],
+            "-",
+            color=color,
+            alpha=0.7,
+            label=f"{hp_name}={hp_val}",
+        )
+        ax1.plot(epochs, hist["val_loss"], "--", color=color, alpha=0.7)
+        ax2.plot(
+            epochs,
+            hist["train_acc"],
+            "-",
+            color=color,
+            alpha=0.7,
+            label=f"{hp_name}={hp_val}",
+        )
+        ax2.plot(epochs, hist["val_acc"], "--", color=color, alpha=0.7)
+
+    # Linestyle-Legende: solid=Train, dashed=Validation
+    style_handles = [
+        Line2D([0], [0], color="gray", linestyle="-", label="Train"),
+        Line2D([0], [0], color="gray", linestyle="--", label="Validation"),
+    ]
+
+    for ax, ylabel, title_suffix in [
+        (ax1, "Loss", "Loss"),
+        (ax2, "Accuracy", "Accuracy"),
+    ]:
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{hp_label}-Tuning — {title_suffix}")
+        handles, _ = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + style_handles, fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def plot_hp_best_accuracy(histories, hp_name="hp", hp_label="Hyperparameter"):
+    """Balkendiagramm: Beste Validation Accuracy pro HP-Wert mit Epoche."""
+    hp_vals = list(histories.keys())
+    best_accs = [max(h["val_acc"]) for h in histories.values()]
+    best_epochs = [int(np.argmax(h["val_acc"])) for h in histories.values()]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(range(len(hp_vals)), best_accs, color="#2196F3", alpha=0.8)
+    ax.set_xticks(range(len(hp_vals)))
+    ax.set_xticklabels([f"{hp_name}={v}" for v in hp_vals], rotation=45, ha="right")
+    ax.set_ylabel("Best Validation Accuracy")
+    ax.set_title(f"{hp_label}-Tuning — Beste Validation Accuracy")
+    ax.set_ylim(min(best_accs) - 0.05, max(best_accs) + 0.03)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    for bar, acc, epoch in zip(bars, best_accs, best_epochs):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.005,
+            f"{acc:.3f}\n(Ep. {epoch})",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    # Besten Balken hervorheben
+    best_idx = int(np.argmax(best_accs))
+    bars[best_idx].set_color("#4CAF50")
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def plot_hp_gap_comparison(histories, hp_name="hp", hp_label="Hyperparameter"):
+    """Generalization Gap (Val Loss - Train Loss) im Vergleich ueber mehrere HP-Werte."""
+    colors = plt.cm.tab10(np.linspace(0, 0.8, len(histories)))
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for (hp_val, hist), color in zip(histories.items(), colors):
+        epochs = range(len(hist["train_loss"]))
+        gap = [v - t for t, v in zip(hist["train_loss"], hist["val_loss"])]
+        ax.plot(epochs, gap, color=color, linewidth=1.5, label=f"{hp_name}={hp_val}")
+
+    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Val Loss - Train Loss")
+    ax.set_title(f"{hp_label}-Tuning — Generalization Gap")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+```
+
+### Cross-Validation-Visualisierungen
+
+- **Mean ± Std Band für Loss und Accuracy**: zeigt den durchschnittlichen Trainings- und Validierungsverlauf über alle Folds hinweg sowie die Streuung der Ergebnisse.
+- **Per-Class Accuracy pro Fold**: gruppiertes Balkendiagramm, das die Accuracy jeder Klasse für jeden einzelnen Fold darstellt.
+- **Mean ± Std der Per-Class Accuracy**: ergänzt die klassenweisen Fold-Ergebnisse durch den Mittelwert und die Standardabweichung, um die Stabilität der Klassenleistung über alle Folds hinweg sichtbar zu machen.
+
+```{python}
+def plot_cv_mean_std_band(fold_results, title_prefix="Cross-Validation"):
+    """Mean +/- Std Band ueber alle Folds fuer Loss und Accuracy."""
+    n_epochs = min(len(r["history"]["val_loss"]) for r in fold_results)
+
+    # Sammle Metriken pro Epoche
+    val_losses = np.array([r["history"]["val_loss"][:n_epochs] for r in fold_results])
+    val_accs = np.array([r["history"]["val_acc"][:n_epochs] for r in fold_results])
+    train_losses = np.array(
+        [r["history"]["train_loss"][:n_epochs] for r in fold_results]
+    )
+    train_accs = np.array([r["history"]["train_acc"][:n_epochs] for r in fold_results])
+    epochs = np.arange(n_epochs)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Loss
+    for data, color, label in [
+        (train_losses, "#2196F3", "Train"),
+        (val_losses, "#E53935", "Validation"),
+    ]:
+        mean = data.mean(axis=0)
+        std = data.std(axis=0)
+        ax1.plot(epochs, mean, color=color, linewidth=2, label=f"{label} (Mean)")
+        ax1.fill_between(
+            epochs,
+            mean - std,
+            mean + std,
+            color=color,
+            alpha=0.15,
+            label=f"{label} (±1 Std)",
+        )
+
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title(f"{title_prefix} — Loss (Mean ± Std)")
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # Accuracy
+    for data, color, label in [
+        (train_accs, "#2196F3", "Train"),
+        (val_accs, "#E53935", "Validation"),
+    ]:
+        mean = data.mean(axis=0)
+        std = data.std(axis=0)
+        ax2.plot(epochs, mean, color=color, linewidth=2, label=f"{label} (Mean)")
+        ax2.fill_between(
+            epochs,
+            mean - std,
+            mean + std,
+            color=color,
+            alpha=0.15,
+            label=f"{label} (±1 Std)",
+        )
+
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_title(f"{title_prefix} — Accuracy (Mean ± Std)")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def plot_cv_per_class_accuracy(
+    fold_predictions,
+    class_names,
+    title="Cross-Validation — Per-Class Accuracy pro Fold",
+):
+    """Gruppiertes Balkendiagramm: Accuracy pro Klasse, aufgeschluesselt nach Fold."""
+    n_folds = len(fold_predictions)
+    n_classes = len(class_names)
+
+    # Per-Class Accuracy pro Fold berechnen
+    per_class_accs = np.zeros((n_folds, n_classes))
+    for f_idx, pred in enumerate(fold_predictions):
+        for c_idx in range(n_classes):
+            mask = pred["y_true"] == c_idx
+            if mask.sum() > 0:
+                per_class_accs[f_idx, c_idx] = (pred["y_pred"][mask] == c_idx).mean()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(n_classes)
+    width = 0.8 / n_folds
+
+    for f_idx in range(n_folds):
+        offset = (f_idx - n_folds / 2 + 0.5) * width
+        ax.bar(
+            x + offset,
+            per_class_accs[f_idx],
+            width,
+            label=f"Fold {f_idx + 1}",
+            alpha=0.8,
+        )
+
+    # Mean + Std als Fehlerbalken
+    mean_accs = per_class_accs.mean(axis=0)
+    std_accs = per_class_accs.std(axis=0)
+    ax.errorbar(
+        x,
+        mean_accs,
+        yerr=std_accs,
+        fmt="ko",
+        capsize=5,
+        capthick=2,
+        linewidth=0,
+        elinewidth=2,
+        label="Mean ± Std",
+        zorder=5,
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names, rotation=45, ha="right")
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    plt.show()
+    return fig
 ```
 
 ## Schritt 3: CNN-Basismodell
@@ -494,88 +1022,105 @@ with torch.no_grad():
 
 ## Schritt 4: Overfitting-Test
 
-Laut Aufgabenstellung (Punkt 3d): Trainiere auf einem einzelnen Batch. Der Loss muss gegen 0 gehen — das bestätigt, dass Modell und Training-Loop korrekt funktionieren.
+Laut Aufgabenstellung (Punkt 3d): Trainiere auf einem einzelnen Batch. Der Loss muss gegen 0 gehen. Das bestätigt, dass Modell und Training-Loop korrekt funktionieren.
 
 ```{python}
 # Overfitting-Test: ein einzelner Batch, 200 Iterationen mit höherer LR
+# Verwendet train_model() und evaluate(), um gleichzeitig den Training-Loop zu validieren.
+
 overfit_model = BaseCNN(NUM_CLASSES).to(device)
 overfit_optimizer = optim.SGD(overfit_model.parameters(), lr=0.05)
-overfit_criterion = nn.CrossEntropyLoss()
 
-# Einen Batch extrahieren
+# Einen Batch extrahieren und als DataLoader wrappen
 single_batch_X, single_batch_Y = next(iter(train_loader))
-single_batch_X = single_batch_X.to(device)
-single_batch_Y = single_batch_Y.to(device)
+single_batch_dataset = TensorDataset(single_batch_X, single_batch_Y)
+single_batch_loader = DataLoader(single_batch_dataset, batch_size=len(single_batch_X))
 
-overfit_losses = []
-overfit_model.train()
+# 200 Epochs = 200 Iterationen (Loader enthält nur 1 Batch)
+history_overfit = train_model(
+    overfit_model,
+    single_batch_loader,
+    single_batch_loader,  # Val = gleicher Batch (Overfitting-Test)
+    criterion,
+    overfit_optimizer,
+    device,
+    epochs=200,
+    log_wandb=False,
+)
 
-for i in range(200):
-    pred = overfit_model(single_batch_X)
-    loss = overfit_criterion(pred, single_batch_Y)
+plot_training(
+    history_overfit, title="Overfitting-Test: Training auf einem einzelnen Batch"
+)
 
-    overfit_optimizer.zero_grad()
-    loss.backward()
-    overfit_optimizer.step()
-
-    overfit_losses.append(loss.item())
-    if i % 40 == 0 or i == 199:
-        acc = (pred.argmax(dim=1) == single_batch_Y).float().mean().item()
-        print(f"Iter {i:3d} | Loss: {loss.item():.4f} | Acc: {acc:.4f}")
-
-plt.figure(figsize=(8, 4))
-plt.plot(overfit_losses)
-plt.xlabel("Iteration")
-plt.ylabel("Loss")
-plt.title("Overfitting-Test: Training auf einem einzelnen Batch")
-plt.grid(True, alpha=0.3)
-plt.show()
-
-print(f"\nFinal Loss: {overfit_losses[-1]:.6f}")
-if overfit_losses[-1] < 0.1:
-    print("BESTANDEN — Modell kann einen Batch overfitten.")
+final_loss = history_overfit["train_loss"][-1]
+final_acc = history_overfit["train_acc"][-1]
+print(f"\nFinal Loss: {final_loss:.6f} | Final Acc: {final_acc:.4f}")
+if final_loss < 0.01 and final_acc > 0.99:
+    print(
+        "BESTANDEN — Modell kann einen Batch overfitten. Training-Loop funktioniert korrekt."
+    )
 else:
     print("NICHT BESTANDEN — Loss konvergiert nicht gegen 0.")
 ```
 
+### Beobachtungen Overfitting-Test
+
+**Train vs. Validation identisch:** Da beide Kurven auf exakt denselben Daten operieren (gleicher DataLoader für Train und Validation), liegen sie nahezu perfekt übereinander. Der minimale Unterschied entsteht dadurch, dass `train_epoch()` im `model.train()`-Modus läuft und die Metriken **während** des Gradientenupdates berechnet (der Loss am Anfang des Batches, bevor die Gewichte aktualisiert werden), während `evaluate()` im `model.eval()`-Modus die Metriken **nach** dem Update berechnet. Daher ist die rote Validation-Kurve immer minimal besser als die blaue Train-Kurve.
+
+
+**Spikes im Verlauf:** Die Spikes entstehen durch die Kombination aus hoher Lernrate (0.05) und SGD ohne Momentum auf nur einem einzigen Batch. Bei einem einzelnen Batch von 64 Bildern ist die Loss-Landschaft nicht glatt, sondern hat krümmungen. Mit `lr=0.05` sind die Gradientenschritte gross genug, um über ein lokales Minimum hinauszuschiessen und in einen Bereich mit höherem Loss zu springen. Das Modell "springt" dann wieder zurück, was die wiederholten Spikes erklärt.
+
+Der Gesamttrend ist klar abwärts, und ab ca. Epoch 150 konvergiert der Loss stabil gegen 0. Die Spikes sind also kein Problem. Sie zeigen nur, dass die LR für diesen kleinen Datensatz aggressiv ist. Mit einer kleineren LR (z.B. 0.01) wären die Kurven glatter, aber die Konvergenz langsamer.
+
 ## Schritt 5: Basis-Training mit W&B
 
-Training des Basismodells mit SGD (ohne Momentum), lr=0.01, 25 Epochs. W&B trackt alle Metriken.
+Training des Basismodells mit SGD (ohne Momentum), lr=0.05, 150 Epochs. W&B trackt alle Metriken.
 
 ```{python}
 # Basis-Training
 run = wandb.init(
     project="del-mini-challenge",
-    name="base-model-sgd-lr0.01",
+    name="base-model-sgd-lr0.05",
     config={
         "architecture": "BaseCNN",
         "optimizer": "SGD",
-        "lr": 0.01,
+        "lr": 0.05,
         "momentum": 0.0,
         "batch_size": BATCH_SIZE,
-        "epochs": 25,
+        "epochs": 150,
         "num_classes": NUM_CLASSES,
     },
 )
 
 model = BaseCNN(NUM_CLASSES).to(device)
-optimizer = optim.SGD(model.parameters(), lr=0.01)
+optimizer = optim.SGD(model.parameters(), lr=0.05)
 wandb.watch(model, log="all")
 
 history_base = train_model(
-    model, train_loader, val_loader, criterion, optimizer, device, epochs=25
+    model, train_loader, val_loader, criterion, optimizer, device, epochs=150
+)
+```
+
+### Evaluation Basismodell
+
+Vollständige Evaluation auf dem Validierungsset. Alle Rohdaten (Confusion Matrix, Per-Class Precision/Recall/F1, Top-Loss Samples inkl. Bilder) werden zu W&B geloggt und ausschliesslich im **W&B-Report** interaktiv dargestellt — im Notebook werden keine Plots mehr erzeugt.
+
+```{python}
+# Vollständige Evaluation des Basismodells auf dem Validierungsset
+# Rohdaten werden zu W&B geloggt; alle Visualisierungen im W&B-Report erzeugt.
+results_base = evaluate_model(
+    model,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
 )
 
 wandb.finish()
 ```
 
-### Lernkurven Basismodell
-
-Visualisierung von Loss und Accuracy (Train vs. Validation) über die 25 Epochs.
-
-```{python}
-plot_training(history_base, title="Basismodell (SGD, lr=0.01)")
-```
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Basis-modell-Report--VmlldzoxNjU5ODYwMQ" style="border:none;height:1024px;width:100%">
 
 ## Schritt 6: Lernraten-Tuning
 
@@ -585,7 +1130,7 @@ Wir testen mehrere Lernraten (0.001, 0.005, 0.01, 0.05, 0.1) mit SGD ohne Moment
 # LR-Tuning: mehrere Lernraten vergleichen
 learning_rates = [0.001, 0.005, 0.01, 0.05, 0.1]
 lr_histories = {}
-LR_EPOCHS = 20
+LR_EPOCHS = 100
 
 for lr in learning_rates:
     print(f"\n{'='*60}")
@@ -623,58 +1168,63 @@ for lr in learning_rates:
     wandb.finish()
 ```
 
-### Vergleichsplot und beste Lernrate
+### Beste Lernrate
 
-Validation Loss und Accuracy aller getesteten Lernraten im Vergleich. Auswahl der besten LR basierend auf maximaler Validation Accuracy.
+Wir ermitteln die beste Lernrate und loggen ein interaktives Bar-Chart (`wandb.plot.bar`) mit der Best Validation Accuracy pro Lernrate. Train-/Val-Loss- und Accuracy-Kurven aus den einzelnen Runs werden direkt im W&B-Report als Line-Plots nachgebaut; Generalization-Gap-Panels ebenfalls.
 
 ```{python}
-# Vergleichsplot: alle Lernraten
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-for lr, hist in lr_histories.items():
-    epochs = range(len(hist["val_loss"]))
-    ax1.plot(epochs, hist["val_loss"], label=f"lr={lr}")
-    ax2.plot(epochs, hist["val_acc"], label=f"lr={lr}")
-
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Validation Loss")
-ax1.set_title("LR-Tuning — Validation Loss")
-ax1.legend()
-ax1.grid(True, alpha=0.3)
-
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("Validation Accuracy")
-ax2.set_title("LR-Tuning — Validation Accuracy")
-ax2.legend()
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-
-# Beste LR ermitteln
+# Beste Lernrate ermitteln
 best_lr = max(lr_histories.keys(), key=lambda lr: max(lr_histories[lr]["val_acc"]))
 best_val_acc = max(lr_histories[best_lr]["val_acc"])
-print(f"\nBeste Lernrate: {best_lr} (max Val Accuracy: {best_val_acc:.4f})")
+best_lr_epoch = int(np.argmax(lr_histories[best_lr]["val_acc"]))
+print(
+    f"\nBeste Lernrate: {best_lr} (Val Accuracy: {best_val_acc:.4f}, Epoche {best_lr_epoch})"
+)
+
+# W&B Summary-Run: interaktives Bar-Chart via wandb.plot.bar
+run = wandb.init(
+    project="del-mini-challenge",
+    name="lr-tuning-summary",
+    config={
+        "experiment": "lr-tuning-summary",
+        "learning_rates": [str(lr) for lr in lr_histories.keys()],
+    },
+    reinit=True,
+)
+
+best_acc_table = wandb.Table(
+    columns=["lr", "best_val_acc"],
+    data=[
+        [str(lr), float(max(lr_histories[lr]["val_acc"]))] for lr in lr_histories.keys()
+    ],
+)
+wandb.log(
+    {
+        "lr_tuning/best_accuracy": wandb.plot.bar(
+            best_acc_table,
+            "lr",
+            "best_val_acc",
+            title="Lernraten-Tuning — Best Validation Accuracy",
+        ),
+        "lr_tuning/best_lr": best_lr,
+        "lr_tuning/best_val_acc": best_val_acc,
+        "lr_tuning/best_epoch": best_lr_epoch,
+    }
+)
+wandb.finish()
 ```
 
-### Diskussion LR-Tuning
-
-**Beobachtungen:**
-- Sehr kleine Lernraten (0.001) konvergieren langsam — das Modell hat nach 20 Epochs noch nicht sein Potenzial ausgeschöpft.
-- Zu grosse Lernraten (0.1) können instabil werden: der Loss oszilliert oder das Training divergiert.
-- Mittlere Lernraten (0.005–0.05) liefern in der Regel die beste Balance zwischen Konvergenzgeschwindigkeit und Stabilität.
-
-**Theoretischer Hintergrund:** Bei SGD ohne Momentum bestimmt die Lernrate die Schrittgrösse im Gradientenabstieg. Eine zu kleine LR führt zu langsamer Konvergenz, eine zu grosse LR kann über das Minimum "hinausschiessen" und zu Divergenz führen (vgl. Vorlesungsfolien DEL, Optimizers).
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Learning-Rate-Tuning-Report--VmlldzoxNjYwMTUxMA" style="border:none;height:1024px;width:100%">
 
 ## Schritt 7: Batch-Size-Tuning
 
-Wir testen verschiedene Batch-Sizes (16, 32, 64, 128) mit der besten Lernrate aus Schritt 6.
+Wir testen verschiedene Batch-Sizes (16, 32, 64, 128) mit der besten Lernrate aus Schritt 6 (lr=0.05).
 
 ```{python}
 # Batch-Size-Tuning mit bester LR
 batch_sizes = [16, 32, 64, 128]
 bs_histories = {}
-BS_EPOCHS = 20
+BS_EPOCHS = 100
 
 for bs in batch_sizes:
     print(f"\n{'='*60}")
@@ -716,65 +1266,71 @@ for bs in batch_sizes:
     wandb.finish()
 ```
 
-### Vergleichsplot und beste Batch-Size
+### Beste Batch-Size
 
-Validation Loss und Accuracy aller getesteten Batch-Sizes im Vergleich. Auswahl der besten Batch-Size basierend auf maximaler Validation Accuracy.
+Best Validation Accuracy pro Batch-Size als interaktives Bar-Chart (`wandb.plot.bar`). Train-/Val-Loss- und Accuracy-Kurven sowie Generalization-Gap werden im W&B-Report aus den per-run-Logs nachgebaut.
 
 ```{python}
-# Vergleichsplot: alle Batch-Sizes
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-for bs, hist in bs_histories.items():
-    epochs = range(len(hist["val_loss"]))
-    ax1.plot(epochs, hist["val_loss"], label=f"bs={bs}")
-    ax2.plot(epochs, hist["val_acc"], label=f"bs={bs}")
-
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Validation Loss")
-ax1.set_title("Batch-Size-Tuning — Validation Loss")
-ax1.legend()
-ax1.grid(True, alpha=0.3)
-
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("Validation Accuracy")
-ax2.set_title("Batch-Size-Tuning — Validation Accuracy")
-ax2.legend()
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-
 # Beste Batch-Size ermitteln
 best_bs = max(bs_histories.keys(), key=lambda bs: max(bs_histories[bs]["val_acc"]))
 best_bs_acc = max(bs_histories[best_bs]["val_acc"])
-print(f"\nBeste Batch-Size: {best_bs} (max Val Accuracy: {best_bs_acc:.4f})")
-print(f"\nBeste Hyperparameter für Stage 1: lr={best_lr}, batch_size={best_bs}")
+best_bs_epoch = int(np.argmax(bs_histories[best_bs]["val_acc"]))
+print(
+    f"\nBeste Batch-Size: {best_bs} (Val Accuracy: {best_bs_acc:.4f}, Epoche {best_bs_epoch})"
+)
+print(f"Beste Hyperparameter fuer Stage 1: lr={best_lr}, batch_size={best_bs}")
+
+# W&B Summary-Run: interaktives Bar-Chart via wandb.plot.bar
+run = wandb.init(
+    project="del-mini-challenge",
+    name="bs-tuning-summary",
+    config={
+        "experiment": "bs-tuning-summary",
+        "batch_sizes": [str(bs) for bs in bs_histories.keys()],
+    },
+    reinit=True,
+)
+
+best_acc_table_bs = wandb.Table(
+    columns=["batch_size", "best_val_acc"],
+    data=[
+        [str(bs), float(max(bs_histories[bs]["val_acc"]))] for bs in bs_histories.keys()
+    ],
+)
+wandb.log(
+    {
+        "bs_tuning/best_accuracy": wandb.plot.bar(
+            best_acc_table_bs,
+            "batch_size",
+            "best_val_acc",
+            title="Batch-Size-Tuning — Best Validation Accuracy",
+        ),
+        "bs_tuning/best_bs": best_bs,
+        "bs_tuning/best_val_acc": best_bs_acc,
+        "bs_tuning/best_epoch": best_bs_epoch,
+    }
+)
+wandb.finish()
 ```
 
-### Diskussion Batch-Size-Tuning
-
-**Beobachtungen:**
-- Kleinere Batch-Sizes (16, 32) führen zu mehr Gewichtsupdates pro Epoche und können durch die stochastischere Gradientenschätzung schneller konvergieren, sind aber auch lauter.
-- Grössere Batch-Sizes (64, 128) haben stabilere Gradienten, brauchen aber tendenziell mehr Epochs oder eine angepasste LR.
-- Die Wahl der Batch-Size beeinflusst sowohl die Trainingsgeschwindigkeit (wall-clock time) als auch die Generalisierung.
-
-**Theoretischer Hintergrund:** Kleinere Batches erzeugen mehr Rauschen im Gradienten, was als implizite Regularisierung wirken und zu besserer Generalisierung führen kann. Grössere Batches liefern genauere Gradientenschätzungen, neigen aber dazu, in scharfe Minima zu konvergieren (vgl. "On Large-Batch Training for Deep Learning", Keskar et al., 2017).
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Batch-size-Tuning-Report--VmlldzoxNjYwMTc1Ng" style="border:none;height:1024px;width:100%">
 
 ## Schritt 8: Cross-Validation (Statistischer Fehler)
 
-3-Fold Cross-Validation auf dem gesamten Trainingsset mit den besten Hyperparametern. Ziel: Schätzung der Generalisierungsperformance mit Mittelwert und Standardabweichung.
+5-Fold Cross-Validation auf dem gesamten Trainingsset mit den besten Hyperparametern. Ziel: Schätzung der Generalisierungsperformance mit Mittelwert und Standardabweichung.
 
 ```{python}
-# Cross-Validation: 3-Fold auf gesamtem Trainingsset
-K_FOLDS = 3
-CV_EPOCHS = 20
+# Cross-Validation: 5-Fold auf gesamtem Trainingsset
+K_FOLDS = 5
+CV_EPOCHS = 100
 
 # Gesamtes Trainingsset (ohne Split) für CV
 full_train_dataset = IntelImageDataset(dataset["train"], transform=transform_train)
 full_eval_dataset = IntelImageDataset(dataset["train"], transform=transform_eval)
 
-kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
+kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=RANDOM_SEED)
 fold_results = []
+fold_predictions = []  # Predictions pro Fold für Per-Class Analyse
 
 for fold, (train_ids, val_ids) in enumerate(kfold.split(full_train_dataset)):
     print(f"\n{'='*60}")
@@ -822,6 +1378,10 @@ for fold, (train_ids, val_ids) in enumerate(kfold.split(full_train_dataset)):
         epochs=CV_EPOCHS,
     )
 
+    # Predictions auf Validation-Fold sammeln (für Per-Class Analyse)
+    preds_cv = collect_predictions(model_cv, fold_val_loader, device)
+    fold_predictions.append(preds_cv)
+
     best_fold_acc = max(history_cv["val_acc"])
     final_fold_acc = history_cv["val_acc"][-1]
     fold_results.append(
@@ -836,7 +1396,6 @@ for fold, (train_ids, val_ids) in enumerate(kfold.split(full_train_dataset)):
     print(
         f"\nFold {fold+1}: Best Val Acc = {best_fold_acc:.4f}, Final Val Acc = {final_fold_acc:.4f}"
     )
-    wandb.finish()
 ```
 
 ### Ergebnisse und statistischer Fehler
@@ -862,26 +1421,58 @@ print(
 )
 print(f"Hyperparameter: lr={best_lr}, batch_size={best_bs}")
 
-# Lernkurven aller Folds plotten
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-for r in fold_results:
-    epochs = range(len(r["history"]["val_loss"]))
-    ax1.plot(epochs, r["history"]["val_loss"], label=f"Fold {r['fold']}")
-    ax2.plot(epochs, r["history"]["val_acc"], label=f"Fold {r['fold']}")
+# 1. Train + Val Lernkurven pro Fold (solid=Train, gestrichelt=Validation)
+fold_histories = {f"Fold {r['fold']}": r["history"] for r in fold_results}
+fig_folds = plot_hp_comparison(fold_histories, hp_name="", hp_label="Cross-Validation")
 
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Validation Loss")
-ax1.set_title("Cross-Validation — Validation Loss")
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+# 2. Mean ± Std Band
+fig_band = plot_cv_mean_std_band(fold_results, title_prefix="Cross-Validation")
 
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("Validation Accuracy")
-ax2.set_title("Cross-Validation — Validation Accuracy")
-ax2.legend()
-ax2.grid(True, alpha=0.3)
+# 3. Generalization Gap pro Fold
+fig_gap = plot_hp_gap_comparison(
+    fold_histories, hp_name="", hp_label="Cross-Validation"
+)
 
-plt.tight_layout()
-plt.show()
+# 4. Box-Plot der CV-Ergebnisse
+fig_box = plot_cv_boxplot(
+    fold_results, title="Cross-Validation — Accuracy Distribution"
+)
+
+# 5. Per-Class Accuracy pro Fold
+fig_per_class = plot_cv_per_class_accuracy(
+    fold_predictions,
+    CLASS_NAMES,
+    title="Cross-Validation — Per-Class Accuracy pro Fold",
+)
+
+# CV-Zusammenfassung an W&B loggen
+run = wandb.init(
+    project="del-mini-challenge",
+    name="cv-summary",
+    config={
+        "experiment": "cross-validation-summary",
+        "k_folds": K_FOLDS,
+        "lr": best_lr,
+        "batch_size": best_bs,
+    },
+    reinit=True,
+)
+wandb.log(
+    {
+        "cv/fold_learning_curves": wandb.Image(fig_folds),
+        "cv/mean_std_band": wandb.Image(fig_band),
+        "cv/generalization_gap": wandb.Image(fig_gap),
+        "cv/boxplot": wandb.Image(fig_box),
+        "cv/per_class_accuracy": wandb.Image(fig_per_class),
+        "cv/mean_best_acc": np.mean(best_accs),
+        "cv/std_best_acc": np.std(best_accs),
+        "cv/mean_final_acc": np.mean(final_accs),
+        "cv/std_final_acc": np.std(final_accs),
+    }
+)
+for fig in [fig_folds, fig_band, fig_gap, fig_box, fig_per_class]:
+    plt.close(fig)
+wandb.finish()
 ```
+
 
