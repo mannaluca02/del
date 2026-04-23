@@ -57,6 +57,9 @@ from pathlib import Path
 # GLobal variables
 RANDOM_SEED = 42
 DATA_DIR = Path("../data/intel-image-classification")
+
+# Set random seeds for reproducibility
+torch.manual_seed(RANDOM_SEED)
 ```
 
 ### Daten laden
@@ -695,15 +698,18 @@ def evaluate_model(
         )
 
         # Top-Loss Samples als Table mit Bildern → sortierbares Panel im Report
+        # Zusaetzliche Spalte "run" erleichtert Zuordnung beim Vergleich mehrerer Modelle.
+        run_name = wandb.run.name if wandb.run is not None else "unknown"
         top_idx = np.argsort(results["losses"])[-top_n_loss:][::-1]
         top_loss_table = wandb.Table(
-            columns=["image", "true", "pred", "confidence", "loss"]
+            columns=["run", "image", "true", "pred", "confidence", "loss"]
         )
         for idx in top_idx:
             img = (
                 denormalize(results["images"][idx], mean, std).permute(1, 2, 0).numpy()
             )
             top_loss_table.add_data(
+                run_name,
                 wandb.Image(img),
                 class_names[int(y_true[idx])],
                 class_names[int(y_pred[idx])],
@@ -1475,4 +1481,625 @@ for fig in [fig_folds, fig_band, fig_gap, fig_box, fig_per_class]:
 wandb.finish()
 ```
 
+### TODO: Standart fehler anzeigen nicht die Standart abweichung. Der einte wert ist anscheinend noch durch anzahl folds gerechnet -> Anschauen was standart fehler vs standart abweichung genau ist
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Cross-validation-Report--VmlldzoxNjYwMTgzNg" style="border:none;height:1024px;width:100%">
+
+# Phase 2: Hyperparameter Tuning
+
+In dieser Phase werden 11 Hypothesen aus sieben Themengruppen untersucht: Modellkomplexitaet (Tiefe, Breite), Conv Layer Settings (Kernel Size, Pooling), Regularisierung (Dropout, Data Augmentation, Weight Decay), BatchNorm, Gewichts-Initialisierung, Adam Optimizer und Transfer Learning.
+
+## Methodik
+
+**Fixe Phase 2 Baseline als Referenz.** Statt pro Hypothese zweimal zu trainieren, wird einmal ein `phase2-baseline` Run mit dem BaseCNN und den besten Hyperparametern aus Stage 1 (lr=0.05, bs=64) trainiert. Alle folgenden Hypothesen werden gegen diesen einen Run verglichen. Das spart Rechenzeit und die Vergleiche sind deterministisch unter identischen Bedingungen.
+
+**50 Epochen pro Experiment.** Aus Stage 1 wissen wir, dass die Val Accuracy beim Basismodell bereits ab ca. Epoche 30 auf einem Plateau zwischen 83 und 86 Prozent liegt und danach hauptsaechlich der Generalization Gap weiter waechst. 50 Epochen reichen also aus, um Peak Accuracy, Konvergenzverhalten und Overfitting-Trend zu beobachten. Laengeres Training wuerde den Vergleich nicht informativer machen, sondern nur Ressourcen binden. Ausnahmen (z.B. Transfer Learning mit weniger Epochen) werden pro Hypothese begruendet.
+
+**Data Augmentation.** Die Stage 1 Pipeline enthaelt bereits `RandomResizedCrop` und `RandomHorizontalFlip`. Die Phase 2 Baseline uebernimmt diese Pipeline unveraendert. H6 (Data Augmentation) untersucht entsprechend, wie stark die Performance einbricht, wenn Augmentation entfernt wird, bzw. was zusaetzliche Augmentations (ColorJitter, RandomRotation) bringen.
+
+## Ablauf pro Hypothese
+
+1. **Hypothese** mit theoretischer Begruendung und Kursreferenz.
+2. **Experiment** mit klar definierter Aenderung, alle anderen Hyperparameter konstant.
+3. **Analyse und Reflexion** mit Beobachtung, Interpretation und Abgleich mit der Hypothese.
+
+Am Schluss wird das beste Modell aus der Kombination der erfolgversprechenden Techniken gebaut.
+
+## Phase 2 Baseline
+
+Referenz-Run fuer alle Hypothesen. BaseCNN, lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum, keine Regularisierung. W&B Run Name: `phase2-baseline`.
+
+```{python}
+# Phase 2 Baseline: wird einmal trainiert und als Referenz fuer alle Hypothesen verwendet.
+PHASE2_EPOCHS = 50
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="phase2-baseline",
+    config={
+        "architecture": "BaseCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "experiment": "phase2-baseline",
+    },
+    reinit=True,
+)
+
+model_phase2_base = BaseCNN(NUM_CLASSES).to(device)
+optimizer_phase2_base = optim.SGD(model_phase2_base.parameters(), lr=best_lr)
+
+history_phase2_base = train_model(
+    model_phase2_base,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_phase2_base,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_phase2_base = evaluate_model(
+    model_phase2_base,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_base = max(history_phase2_base["val_acc"])
+print(f"\nPhase 2 Baseline Peak Val Accuracy: {peak_val_acc_base:.4f}")
+wandb.finish()
+```
+
+## Hypothese 1: Modelltiefe
+
+**Hypothesen:**
+
+1. Ein tieferes CNN mit vier Conv Blöcken statt drei lernt eine reichere Feature Hierarchie und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Da mehr Parameter dazukommen und ohne BatchNorm trainiert wird, entsteht gleichzeitig ein grösserer Generalization Gap.
+3. In den ersten Epochen ist mit einem instabileren Trainingsverlauf zu rechnen, weil Gradienten durch mehr Schichten propagieren müssen.
+
+**Begründung:** CNNs lernen hierarchisch. Untere Schichten erkennen Kanten und Texturen, mittlere Schichten Formen, tiefere Schichten ganze Objektteile. Auf den Intel Image Scenes mit Gebäuden, Strassen, Wald, Gletschern, Bergen und Meer sollten gerade die objekthaften Klassen von einer tieferen Hierarchie profitieren. Das Risiko liegt im Optimierer. Bei SGD ohne Momentum und ohne BatchNorm können Gradienten in tieferen Schichten verschwinden oder instabil werden.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`, `05-02-MLP-vs-CNN.pdf`
+
+### Experiment
+
+`DeepCNN`: vier Conv-Bloecke (16 → 32 → 64 → 128 Filter, 3x3 Kernel, MaxPool(2) nach jedem Block). FC-Teil unveraendert. Training mit identischen Bedingungen wie Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen).
+
+```{python}
+class DeepCNN(nn.Module):
+    """Vier Conv-Bloecke (16 -> 32 -> 64 -> 128) statt drei. FC-Teil unveraendert."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 16  # 4x MaxPool(2)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Parameter-Vergleich
+base_params = sum(p.numel() for p in BaseCNN(NUM_CLASSES).parameters())
+deep_params = sum(p.numel() for p in DeepCNN(NUM_CLASSES).parameters())
+print(f"Baseline (3 Bloecke): {base_params:,} Parameter")
+print(
+    f"DeepCNN  (4 Bloecke): {deep_params:,} Parameter ({(deep_params/base_params - 1)*100:+.1f}%)"
+)
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h1-depth-4blocks",
+    config={
+        "architecture": "DeepCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "experiment": "h1-depth",
+        "hypothesis": "Mehr Tiefe -> hoehere Val Accuracy, groesserer Gap",
+    },
+    reinit=True,
+)
+
+model_h1 = DeepCNN(NUM_CLASSES).to(device)
+optimizer_h1 = optim.SGD(model_h1.parameters(), lr=best_lr)
+
+history_h1 = train_model(
+    model_h1,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_h1,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h1 = evaluate_model(
+    model_h1,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h1 = max(history_h1["val_acc"])
+print(f"\nH1 DeepCNN Peak Val Accuracy: {peak_val_acc_h1:.4f}")
+print(f"Baseline Peak Val Accuracy:   {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                    {(peak_val_acc_h1 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+wandb.finish()
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H1-Modelltiefe--VmlldzoxNjYxNDYzMQ" style="border:none;height:1024px;width:100%">
+
+## Hypothese 2: Modellbreite
+
+**Hypothesen:**
+
+1. Ein breiteres CNN mit doppelt so vielen Filtern pro Block lernt vielfältigere Muster pro Schicht und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Da die Parameterzahl stark ansteigt und weiterhin ohne BatchNorm und ohne Regularisierung trainiert wird, ist mit einem grösseren Generalization Gap zu rechnen.
+3. Da die Anzahl Schichten gleich bleibt und die Filter voneinander unabhängig lernen, ist das Training nicht merklich instabiler als bei der Baseline.
+
+**Begründung:** Die Anzahl Filter pro Conv Schicht bestimmt, wie viele unterschiedliche Merkmale auf derselben Abstraktionsebene parallel erkannt werden können. Mit doppelt so vielen Filtern kann das Netz mehr Kantenorientierungen, Texturen und Farbmuster gleichzeitig abdecken. Bei den sechs Szenenklassen helfen reichere Texturen vor allem bei ähnlich aussehenden Naturklassen wie `glacier`, `mountain` und `sea`, die von der Baseline oft verwechselt werden. Das Risiko liegt in der deutlich grösseren Parameterzahl, die ohne Regularisierung schneller auswendig lernen kann.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`WideCNN`: drei Conv Blöcke wie in der Baseline, aber mit doppelter Filteranzahl (32 → 64 → 128 statt 16 → 32 → 64). Kernel Size 3x3, MaxPool(2) nach jedem Block, FC Teil unverändert. Training unter denselben Bedingungen wie die Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum).
+
+```{python}
+class WideCNN(nn.Module):
+    """Drei Conv Blöcke wie BaseCNN, aber mit doppelter Filteranzahl (32 -> 64 -> 128)."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: img_size -> img_size/2
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 2: img_size/2 -> img_size/4
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 3: img_size/4 -> img_size/8
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 8  # 3x MaxPool(2)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Parameter-Vergleich
+base_params = sum(p.numel() for p in BaseCNN(NUM_CLASSES).parameters())
+wide_params = sum(p.numel() for p in WideCNN(NUM_CLASSES).parameters())
+print(f"Baseline (Filter 16/32/64):  {base_params:,} Parameter")
+print(
+    f"WideCNN  (Filter 32/64/128): {wide_params:,} Parameter ({(wide_params/base_params - 1)*100:+.1f}%)"
+)
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h2-width-2x",
+    config={
+        "architecture": "WideCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "experiment": "h2-width",
+        "hypothesis": "Mehr Filter pro Block -> hoehere Val Accuracy, groesserer Gap",
+    },
+    reinit=True,
+)
+
+model_h2 = WideCNN(NUM_CLASSES).to(device)
+optimizer_h2 = optim.SGD(model_h2.parameters(), lr=best_lr)
+
+history_h2 = train_model(
+    model_h2,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_h2,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h2 = evaluate_model(
+    model_h2,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h2 = max(history_h2["val_acc"])
+print(f"\nH2 WideCNN Peak Val Accuracy: {peak_val_acc_h2:.4f}")
+print(f"Baseline Peak Val Accuracy:   {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                    {(peak_val_acc_h2 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+
+run.finish()
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H2-Modellbreite--VmlldzoxNjYxNTY4Nw" style="border:none;height:1024px;width:100%">
+
+## Hypothese 3: Kernel Size
+
+**Hypothesen:**
+
+1. Ein grösserer Conv Kernel von 5x5 erfasst pro Schicht mehr räumlichen Kontext als ein 3x3 Kernel und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Da mit 5x5 deutlich mehr Gewichte pro Conv Schicht dazukommen, wächst die Parameterzahl moderat, und der Generalization Gap kann leicht zunehmen.
+3. Die Trainingsstabilität bleibt vergleichbar mit der Baseline, weil die Netztiefe identisch bleibt und nur die Filtergrösse verändert wird.
+
+**Begründung:** Die Kernelgrösse bestimmt, wie viele benachbarte Pixel pro Filter direkt zusammengefasst werden. Mit 5x5 sieht jeder Filter in einem einzigen Schritt eine grössere Umgebung, was das Receptive Field pro Schicht vergrössert. Bei nur drei Conv Blöcken kann das ein Vorteil sein, weil die Baseline mit 3x3 Kernels erst nach mehreren Schichten genug räumlichen Kontext aggregiert. Für Szenenbilder mit grossräumigen Strukturen wie Bergketten, Wolken oder Waldflächen ist mehr Kontext pro Schicht plausibel hilfreich. Der Nachteil liegt in der Parameterzahl, da ein 5x5 Kernel 25 Gewichte pro Filter benötigt statt 9 bei 3x3.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`LargeKernelCNN`: drei Conv Blöcke wie in der Baseline und gleiche Filteranzahl (16 → 32 → 64), aber mit 5x5 Kernel statt 3x3. Padding wird auf 2 erhöht, damit die Feature Map Grösse pro Block gleich bleibt. FC Teil unverändert. Training unter denselben Bedingungen wie die Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum).
+
+```{python}
+class LargeKernelCNN(nn.Module):
+    """Drei Conv Blöcke wie BaseCNN, aber mit 5x5 Kernel statt 3x3 (padding=2)."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: img_size -> img_size/2
+            nn.Conv2d(3, 16, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 2: img_size/2 -> img_size/4
+            nn.Conv2d(16, 32, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 3: img_size/4 -> img_size/8
+            nn.Conv2d(32, 64, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 8  # 3x MaxPool(2)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Parameter-Vergleich
+base_params = sum(p.numel() for p in BaseCNN(NUM_CLASSES).parameters())
+lk_params = sum(p.numel() for p in LargeKernelCNN(NUM_CLASSES).parameters())
+print(f"Baseline (3x3 Kernel):       {base_params:,} Parameter")
+print(
+    f"LargeKernelCNN (5x5 Kernel): {lk_params:,} Parameter ({(lk_params/base_params - 1)*100:+.1f}%)"
+)
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h3-kernel-5x5",
+    config={
+        "architecture": "LargeKernelCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "experiment": "h3-kernel-size",
+        "hypothesis": "5x5 Kernel -> mehr Kontext pro Schicht -> hoehere Val Accuracy",
+    },
+    reinit=True,
+)
+
+model_h3 = LargeKernelCNN(NUM_CLASSES).to(device)
+optimizer_h3 = optim.SGD(model_h3.parameters(), lr=best_lr)
+
+history_h3 = train_model(
+    model_h3,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_h3,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h3 = evaluate_model(
+    model_h3,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h3 = max(history_h3["val_acc"])
+print(f"\nH3 LargeKernelCNN Peak Val Accuracy: {peak_val_acc_h3:.4f}")
+print(f"Baseline Peak Val Accuracy:          {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                           {(peak_val_acc_h3 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+
+run.finish()
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H3-Kernal-Size--VmlldzoxNjYyNDkzNg" style="border:none;height:1024px;width:100%">
+
+## Hypothese 4: Pooling Strategie
+
+**Hypothesen:**
+
+1. Ein Netz mit AvgPool statt MaxPool erreicht eine tiefere Val Accuracy als die Baseline, weil MaxPool die markantesten lokalen Merkmale gezielt durchlässt, während AvgPool sie glättet.
+2. Der Generalization Gap fällt bei AvgPool tendenziell kleiner aus, weil die Durchschnittsbildung eine weichere Repräsentation erzeugt und damit einen milden Regularisierungseffekt hat.
+3. Die Trainingsstabilität bleibt vergleichbar mit der Baseline, weil sich weder die Netztiefe, die Breite noch die Parameterzahl ändern.
+
+**Begründung:** MaxPool und AvgPool sind die beiden klassischen Downsampling Operationen in CNNs. MaxPool wählt pro Fenster die stärkste Aktivierung und hebt dadurch scharfe Merkmale wie Kanten und Ecken hervor. AvgPool bildet den Durchschnitt und erzeugt eine glattere, verrauschtere Zusammenfassung. Bei Szenenbildern mit ausgeprägten Strukturen wie Gebäudekanten, Strassenmarkierungen oder Berggraten sollte MaxPool im Vorteil sein. AvgPool könnte umgekehrt bei homogen texturierten Klassen wie Meer oder Wald eine rauschresistentere Repräsentation liefern. Da die Parameterzahl identisch bleibt, ist dies eine reine Ablation auf der Pooling Operation.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `05-02-MLP-vs-CNN.pdf`
+
+### Experiment
+
+`AvgPoolCNN`: identisch zur Baseline (drei Conv Blöcke, 16 → 32 → 64 Filter, 3x3 Kernel), aber mit `AvgPool2d(2)` statt `MaxPool2d(2)` nach jedem Block. FC Teil unverändert. Training unter denselben Bedingungen wie die Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum).
+
+```{python}
+class AvgPoolCNN(nn.Module):
+    """Baseline Architektur mit AvgPool2d statt MaxPool2d."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: img_size -> img_size/2
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AvgPool2d(2),
+            # Block 2: img_size/2 -> img_size/4
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AvgPool2d(2),
+            # Block 3: img_size/4 -> img_size/8
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AvgPool2d(2),
+        )
+        feat_size = img_size // 8
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Parameter-Vergleich (sollte identisch sein)
+base_params = sum(p.numel() for p in BaseCNN(NUM_CLASSES).parameters())
+avg_params = sum(p.numel() for p in AvgPoolCNN(NUM_CLASSES).parameters())
+print(f"Baseline (MaxPool): {base_params:,} Parameter")
+print(
+    f"AvgPoolCNN:         {avg_params:,} Parameter ({(avg_params/base_params - 1)*100:+.1f}%)"
+)
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h4-avgpool",
+    config={
+        "architecture": "AvgPoolCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "experiment": "h4-pooling",
+        "hypothesis": "AvgPool statt MaxPool -> tiefere Val Accuracy, kleinerer Gap",
+    },
+    reinit=True,
+)
+
+model_h4 = AvgPoolCNN(NUM_CLASSES).to(device)
+optimizer_h4 = optim.SGD(model_h4.parameters(), lr=best_lr)
+
+history_h4 = train_model(
+    model_h4,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_h4,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h4 = evaluate_model(
+    model_h4,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h4 = max(history_h4["val_acc"])
+print(f"\nH4 AvgPoolCNN Peak Val Accuracy: {peak_val_acc_h4:.4f}")
+print(f"Baseline Peak Val Accuracy:      {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                       {(peak_val_acc_h4 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+
+run.finish()
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H4-Avg-Pooling--VmlldzoxNjYyNjEwNw" style="border:none;height:1024px;width:100%">
+
+## Hypothese 5: Dropout
+
+**Hypothesen:**
+
+1. Ein Netz mit Dropout im FC Teil reduziert Overfitting und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Der Generalization Gap fällt deutlich kleiner aus, weil Dropout während des Trainings zufällig Aktivierungen abschaltet und das Netz zwingt, redundante Repräsentationen zu lernen.
+3. Die Konvergenz verläuft etwas langsamer und verrauschter, weil pro Batch nur ein Teil der Neuronen aktiv ist und der Optimierer dadurch verrauschtere Gradientenschätzungen bekommt.
+
+**Begründung:** Dropout ist die klassische Regularisierungstechnik in CNNs. Mit einer Wahrscheinlichkeit p wird jedes Neuron im FC Teil während des Trainings temporär auf Null gesetzt. Das zwingt das Netz, sich nicht auf einzelne starke Features zu verlassen, sondern verteilte und robuste Repräsentationen zu lernen. Bei der Inferenz sind alle Neuronen aktiv und die Ausgaben werden entsprechend skaliert. Da die Baseline ohne jegliche Regularisierung trainiert wird und in den bisherigen Runs ein moderater Generalization Gap mit Val Loss Spikes bis etwa 0.4 sichtbar ist, sollte Dropout genau hier ansetzen. Ein Standardwert von p=0.5 im FC Teil ist der Ausgangspunkt.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`DropoutCNN`: identisch zur Baseline (drei Conv Blöcke, 16 → 32 → 64 Filter, 3x3 Kernel, MaxPool(2)), aber mit einem zusätzlichen `nn.Dropout(p=0.5)` zwischen den beiden FC Schichten. Training unter denselben Bedingungen wie die Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum).
+
+```{python}
+class DropoutCNN(nn.Module):
+    """Baseline Architektur mit zusätzlichem Dropout (p=0.5) im FC Teil."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE, dropout_p=0.5):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: img_size -> img_size/2
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 2: img_size/2 -> img_size/4
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 3: img_size/4 -> img_size/8
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 8
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# Parameter-Vergleich (sollte identisch sein, Dropout hat keine Gewichte)
+dropout_p = 0.5
+base_params = sum(p.numel() for p in BaseCNN(NUM_CLASSES).parameters())
+drop_params = sum(
+    p.numel() for p in DropoutCNN(NUM_CLASSES, dropout_p=dropout_p).parameters()
+)
+print(f"Baseline:       {base_params:,} Parameter")
+print(
+    f"DropoutCNN:     {drop_params:,} Parameter ({(drop_params/base_params - 1)*100:+.1f}%)"
+)
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h5-dropout-0.5",
+    config={
+        "architecture": "DropoutCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "dropout_p": dropout_p,
+        "experiment": "h5-dropout",
+        "hypothesis": "Dropout 0.5 im FC -> kleinerer Gap, hoehere Val Accuracy",
+    },
+    reinit=True,
+)
+
+model_h5 = DropoutCNN(NUM_CLASSES, dropout_p=dropout_p).to(device)
+optimizer_h5 = optim.SGD(model_h5.parameters(), lr=best_lr)
+
+history_h5 = train_model(
+    model_h5,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer_h5,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h5 = evaluate_model(
+    model_h5,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h5 = max(history_h5["val_acc"])
+print(f"\nH5 DropoutCNN Peak Val Accuracy: {peak_val_acc_h5:.4f}")
+print(f"Baseline Peak Val Accuracy:      {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                       {(peak_val_acc_h5 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+
+run.finish()
+```
+
+### Analyse und Reflexion
+
+_Nach dem Training ausfüllen. Im W&B Report die Runs `phase2-baseline` und `h5-dropout-0.5` als Vergleich darstellen: Train/Val Loss, Train/Val Accuracy, Generalization Gap._
+
+**Beobachtung:**
+
+- ...
+
+**Abgleich mit Hypothese:**
+
+- ...
+
+**Einordnung:**
+
+- ...
 
