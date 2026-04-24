@@ -2087,19 +2087,643 @@ print(
 run.finish()
 ```
 
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H5-Dropout--VmlldzoxNjYzOTE2OA" style="border:none;height:1024px;width:100%">
+
+## Hypothese 6: Stärkere Data Augmentation
+
+**Hypothesen:**
+
+1. Eine stärkere Augmentation Pipeline (zusätzlich ColorJitter und RandomRotation zum bereits aktiven RandomResizedCrop und HorizontalFlip) reduziert Overfitting weiter und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Der Generalization Gap fällt kleiner aus, weil das Netz pro Epoche mehr Variation sieht und sich schlechter auf spezifische Farbwerte oder Orientierungen einstellen kann.
+3. Die Train Accuracy fällt tiefer aus und die Konvergenz verläuft langsamer, weil die schwierigeren Trainingsdaten mehr Epochen brauchen, bis sie gelernt sind.
+
+**Begründung:** Die Phase 2 Baseline nutzt bereits eine moderate Augmentation (RandomResizedCrop und RandomHorizontalFlip). Die Ergebnisse aus H1 bis H5 zeigen konsistent einen moderaten Generalization Gap, der gegen Trainingsende wächst. Stärkere Augmentation ist eine naheliegende zweite Regularisierungsschraube neben Dropout. ColorJitter variiert Helligkeit, Kontrast und Sättigung, RandomRotation addiert leichte Rotationen bis 10 Grad. Beides ist für das Intel Image Datenset semantisch unbedenklich (Landschaften und Gebäude bleiben auch leicht rotiert oder mit anderem Weissabgleich als Klasse erkennbar).
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`BaseCNN` (identisch zur Phase 2 Baseline), aber mit einem erweiterten Augmentation Transform. Zusätzlich zu `RandomResizedCrop(64, scale=(0.4, 1.0))` und `RandomHorizontalFlip()` kommen `ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)` und `RandomRotation(10)` zum Einsatz. Der Val Loader bleibt unverändert (nur Resize und Normalize). Training unter denselben Bedingungen wie die Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum).
+
+```{python}
+# H6: Stärkere Data Augmentation (ColorJitter + RandomRotation zusätzlich zur Baseline)
+transform_train_strong = transforms.Compose(
+    [
+        transforms.RandomResizedCrop(64, scale=(0.4, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.RandomRotation(10),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=channel_mean.tolist(), std=channel_std.tolist()),
+    ]
+)
+
+train_dataset_strong = IntelImageDataset(hf_train, transform=transform_train_strong)
+train_loader_strong = DataLoader(train_dataset_strong, batch_size=best_bs, shuffle=True)
+
+# Sanity Check: ein Batch laden
+sample_images, sample_labels = next(iter(train_loader_strong))
+print(f"Batch shape: {sample_images.shape}")
+print(f"Pixel range: [{sample_images.min():.2f}, {sample_images.max():.2f}]")
+
+run = wandb.init(
+    project="del-mini-challenge",
+    name="h6-strong-augmentation",
+    config={
+        "architecture": "BaseCNN",
+        "optimizer": "SGD",
+        "lr": best_lr,
+        "momentum": 0.0,
+        "batch_size": best_bs,
+        "epochs": PHASE2_EPOCHS,
+        "augmentation": "RandomResizedCrop + HorizontalFlip + ColorJitter + RandomRotation",
+        "experiment": "h6-strong-augmentation",
+        "hypothesis": "Staerkere Augmentation -> kleinerer Gap, hoehere Val Accuracy",
+    },
+    reinit=True,
+)
+
+model_h6 = BaseCNN(NUM_CLASSES).to(device)
+optimizer_h6 = optim.SGD(model_h6.parameters(), lr=best_lr)
+
+history_h6 = train_model(
+    model_h6,
+    train_loader_strong,
+    val_loader,
+    criterion,
+    optimizer_h6,
+    device,
+    epochs=PHASE2_EPOCHS,
+)
+
+results_h6 = evaluate_model(
+    model_h6,
+    val_loader,
+    CLASS_NAMES,
+    device,
+    channel_mean,
+    channel_std,
+)
+
+peak_val_acc_h6 = max(history_h6["val_acc"])
+print(f"\nH6 Strong Augmentation Peak Val Accuracy: {peak_val_acc_h6:.4f}")
+print(f"Baseline Peak Val Accuracy:              {peak_val_acc_base:.4f}")
+print(
+    f"Differenz:                               {(peak_val_acc_h6 - peak_val_acc_base)*100:+.2f} Prozentpunkte"
+)
+wandb.finish()
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H6-Strong-Augmentation--VmlldzoxNjY0MTMxMg" style="border:none;height:1024px;width:100%">
+
+## Hypothese 7: Weight Decay
+
+**Hypothesen:**
+
+1. Ein SGD Training mit Weight Decay (L2 Regularisierung auf allen Gewichten) reduziert Overfitting und erreicht dadurch eine höhere Val Accuracy als die Baseline.
+2. Der Generalization Gap fällt kleiner aus, weil der Strafterm grosse Gewichtsnormen unterdrückt und das Netz zu einfacheren Funktionen zwingt.
+3. Train Loss endet über dem Baseline Wert, weil der zusätzliche Strafterm gegen eine reine Anpassung an die Trainingsdaten wirkt.
+
+**Begründung:** Weight Decay ist neben Dropout und Data Augmentation die dritte klassische Regularisierungstechnik. In PyTorch wird sie direkt im Optimizer über den `weight_decay` Parameter aktiviert. Bei jedem Schritt wird zusätzlich zum Gradienten ein Term `weight_decay * w` vom Gewicht abgezogen, was einem L2 Penalty auf die Parameter entspricht. Da die Baseline keine Regularisierung nutzt und einen moderaten Generalization Gap zeigt, sollte Weight Decay hier einen ähnlichen Effekt haben wie Dropout, aber auf allen Schichten statt nur im FC Teil. Als Wert wird `weight_decay=1e-4` gewählt, ein konservativer Standardwert für CNNs.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`BaseCNN` (identisch zur Phase 2 Baseline), aber der Optimizer wird mit `weight_decay=1e-4` konfiguriert. Alle übrigen Bedingungen bleiben gleich (lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum, identischer Train Loader mit der Baseline Augmentation).
+
+```{python}
+# H7: Weight Decay (L2 Regularisierung) im SGD Optimizer
+weight_decays = [1e-5, 1e-4, 5e-4, 1e-3]
+history_h7_runs = {}
+results_h7_runs = {}
+
+for wd in weight_decays:
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"h7-weight-decay-{wd:.0e}",
+        config={
+            "architecture": "BaseCNN",
+            "optimizer": "SGD",
+            "lr": best_lr,
+            "momentum": 0.0,
+            "weight_decay": wd,
+            "batch_size": best_bs,
+            "epochs": PHASE2_EPOCHS,
+            "experiment": "h7-weight-decay",
+            "hypothesis": "Weight Decay -> kleinerer Gap, hoehere Val Accuracy",
+        },
+        reinit=True,
+    )
+
+    model_h7 = BaseCNN(NUM_CLASSES).to(device)
+    optimizer_h7 = optim.SGD(model_h7.parameters(), lr=best_lr, weight_decay=wd)
+
+    history_h7 = train_model(
+        model_h7,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer_h7,
+        device,
+        epochs=PHASE2_EPOCHS,
+    )
+
+    results_h7 = evaluate_model(
+        model_h7,
+        val_loader,
+        CLASS_NAMES,
+        device,
+        channel_mean,
+        channel_std,
+    )
+
+    history_h7_runs[wd] = history_h7
+    results_h7_runs[wd] = results_h7
+
+    peak_val_acc_h7 = max(history_h7["val_acc"])
+    print(
+        f"\nweight_decay={wd:.0e} | Peak Val Acc: {peak_val_acc_h7:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak_val_acc_h7 - peak_val_acc_base)*100:+.2f} pp"
+    )
+    wandb.finish()
+
+print("\n--- Zusammenfassung H7 Weight Decay ---")
+for wd in weight_decays:
+    peak = max(history_h7_runs[wd]["val_acc"])
+    last = history_h7_runs[wd]["val_acc"][-1]
+    print(
+        f"wd={wd:.0e} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H7-Weight-Decay--VmlldzoxNjY0MTYwMw" style="border:none;height:1024px;width:100%">
+
+## Hypothese 8: BatchNorm
+
+**Hypothesen:**
+
+1. Das Einfügen von `BatchNorm2d` nach jedem Conv-Layer führt zu einer höheren Val Accuracy als die Baseline, weil BatchNorm die Aktivierungen pro Batch normalisiert und damit die Optimierung stabilisiert.
+2. Die Trainingskurven verlaufen glatter und das Netz erreicht in weniger Epochen ein hohes Val Accuracy Niveau (schnellere Konvergenz).
+3. Val Loss zeigt weniger extreme Spikes als bei der Baseline, weil BatchNorm interne Covariate Shifts dämpft.
+4. Die beste Batch-Size verschiebt sich gegenüber der Phase 1 Studie (`best_bs=64`, ohne BN). BN ist direkt batch-size-abhängig: die pro-Batch berechneten Mean/Var sind bei kleinen Batches rauschig (instabile Normalisierung, unzuverlässige `running_mean/var`), bei grossen Batches hingegen sauberer, aber der implizite Regularisierungseffekt durch Batch-Rauschen fällt schwächer aus. Phase 1 `best_bs` wurde ohne BN gefunden und ist darum für `BatchNormCNN` nicht zwingend optimal.
+
+**Begründung:** BatchNorm ist heute praktisch Standard in CNNs. Es normalisiert die Aktivierungen pro Mini-Batch auf Mittelwert 0 und Varianz 1 und lernt zusätzlich einen Skalierungs- und Offset-Parameter. Das erlaubt höhere effektive Lernraten, reduziert die Abhängigkeit von der Gewichtsinitialisierung und wirkt leicht regularisierend. Da die Baseline ohne BatchNorm trainiert wird und teils starke Val Loss Spikes zeigt, sollte BatchNorm hier eine spürbare Verbesserung bringen. Weil BN die Batch-Statistiken direkt nutzt, muss zusätzlich die Batch-Size für `BatchNormCNN` neu tuned werden, bevor ein fairer Vergleich mit der Baseline möglich ist.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+`BatchNormCNN` basiert auf der `BaseCNN` Architektur, fügt aber nach jedem Conv-Layer (vor der ReLU) ein `nn.BatchNorm2d` ein. Reihenfolge pro Block: Conv → BatchNorm → ReLU → MaxPool. FC-Teil unverändert.
+
+Zum Training wird die gleiche Batch-Size Grid wie in Phase 1 (`[16, 32, 64, 128]`) durchlaufen, diesmal aber auf `BatchNormCNN`. Jede Batch-Size ist ein eigener W&B Run, damit der BN-spezifische Sweet Spot sichtbar wird. Alle übrigen Bedingungen bleiben identisch zur Phase 2 Baseline (`lr=best_lr`, 50 Epochen, SGD ohne Momentum, kein Weight Decay, identischer Train Loader mit Baseline Augmentation). Am Ende wird `best_bs_bn` bestimmt und für den späteren Vergleich mit der Baseline bzw. fürs Kombimodell weiterverwendet.
+
+```{python}
+# H8: BatchNorm nach jedem Conv-Layer + Batch-Size Re-Tuning fuer BN
+class BatchNormCNN(nn.Module):
+    """Baseline Architektur mit BatchNorm2d nach jedem Conv-Layer."""
+
+    def __init__(self, num_classes=6, img_size=IMG_SIZE):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: img_size -> img_size/2
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 2: img_size/2 -> img_size/4
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            # Block 3: img_size/4 -> img_size/8
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 8
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * feat_size * feat_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+batch_sizes_bn = [16, 32, 64, 128]
+history_h8_runs = {}
+results_h8_runs = {}
+
+for bs in batch_sizes_bn:
+    print(f"\n{'='*60}")
+    print(f"H8 BatchNormCNN mit batch_size={bs}, lr={best_lr}")
+    print(f"{'='*60}")
+
+    bs_train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True)
+    bs_val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False)
+
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"h8-batchnorm-bs-{bs}",
+        config={
+            "architecture": "BatchNormCNN",
+            "optimizer": "SGD",
+            "lr": best_lr,
+            "momentum": 0.0,
+            "weight_decay": 0.0,
+            "batch_size": bs,
+            "epochs": PHASE2_EPOCHS,
+            "experiment": "h8-batchnorm-bs-tuning",
+            "hypothesis": "BN verschiebt Batch-Size Sweet Spot gegenueber Baseline",
+        },
+        reinit=True,
+    )
+
+    model_h8 = BatchNormCNN(NUM_CLASSES).to(device)
+    optimizer_h8 = optim.SGD(model_h8.parameters(), lr=best_lr)
+
+    history_h8 = train_model(
+        model_h8,
+        bs_train_loader,
+        bs_val_loader,
+        criterion,
+        optimizer_h8,
+        device,
+        epochs=PHASE2_EPOCHS,
+    )
+
+    results_h8 = evaluate_model(
+        model_h8,
+        bs_val_loader,
+        CLASS_NAMES,
+        device,
+        channel_mean,
+        channel_std,
+    )
+
+    history_h8_runs[bs] = history_h8
+    results_h8_runs[bs] = results_h8
+
+    peak = max(history_h8["val_acc"])
+    print(
+        f"\nbs={bs} | Peak Val Acc: {peak:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+    wandb.finish()
+
+print("\n--- Zusammenfassung H8 BatchNorm Batch-Size ---")
+for bs in batch_sizes_bn:
+    peak = max(history_h8_runs[bs]["val_acc"])
+    last = history_h8_runs[bs]["val_acc"][-1]
+    print(
+        f"bs={bs:>3} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+
+best_bs_bn = max(batch_sizes_bn, key=lambda bs: max(history_h8_runs[bs]["val_acc"]))
+print(f"\nBeste Batch-Size mit BatchNorm: {best_bs_bn}")
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H8-Batch-Norm--VmlldzoxNjY1MzgyOQ" style="border:none;height:1024px;width:100%">
+
+## Hypothese 9: Gewichts-Initialisierung
+
+**Hypothesen:**
+
+1. Eine explizite **Kaiming Normal Initialisierung** (He-Init, auf ReLU zugeschnitten) erreicht eine leicht höhere Val Accuracy als die Default-Initialisierung von PyTorch, weil die Varianz der Aktivierungen von Anfang an passend zur ReLU-Nichtlinearität gewählt wird.
+2. Eine **Xavier Normal Initialisierung** (ursprünglich für Sigmoid/Tanh konzipiert) schneidet bei ReLU schlechter ab, weil die Varianzskalierung für symmetrische Aktivierungen ausgelegt ist und bei ReLU zu kleinen Aktivierungen in tieferen Schichten führt.
+3. In den ersten Epochen zeigt sich der grösste Unterschied, weil die Initialisierung vor allem die Startbedingungen für das Training prägt. Nach ausreichend vielen Epochen kann sich der Abstand relativieren.
+
+**Begründung:** Der PyTorch Default für `nn.Conv2d` und `nn.Linear` ist Kaiming Uniform mit `a=sqrt(5)`, was einer leicht abgewandelten He-Initialisierung entspricht. Die explizite Kaiming Normal Variante mit `nonlinearity='relu'` und `a=0` ist die lehrbuchmässige "richtige" Wahl für ReLU-Netze. Xavier (Glorot) wurde für symmetrische Aktivierungen (Tanh, Sigmoid) entwickelt und ist für ReLU bekanntermassen suboptimal, weil die effektive Varianz nach der ReLU halbiert wird und die Aktivierungen in tieferen Schichten langsam verschwinden. Das Vergleichsexperiment zeigt, wie gross der praktische Unterschied bei einem kleinen CNN tatsächlich ist.
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+Gleicher `BaseCNN` wie in der Phase 2 Baseline, aber vor dem Training werden die Gewichte aller Conv- und Linear-Layer explizit initialisiert. Biases werden immer auf 0 gesetzt. Getestet werden drei Schemata:
+
+- `default`: PyTorch-Default (Kaiming Uniform mit `a=sqrt(5)`).
+- `kaiming_normal`: He-Initialisierung, `nn.init.kaiming_normal_` mit `nonlinearity='relu'`.
+- `xavier_normal`: Glorot-Initialisierung, `nn.init.xavier_normal_`.
+
+Alle übrigen Bedingungen bleiben identisch zur Phase 2 Baseline (`lr=best_lr`, `bs=best_bs`, 50 Epochen, SGD ohne Momentum, kein Weight Decay, identischer Train Loader). Jedes Schema läuft als eigener W&B Run, damit die Startdynamik und der Endzustand direkt vergleichbar sind.
+
+```{python}
+# H9: Gewichts-Initialisierung (Default, Kaiming Normal, Xavier Normal)
+def apply_init(model, scheme):
+    """Initialisiert Conv- und Linear-Gewichte nach dem gewuenschten Schema."""
+    if scheme == "default":
+        return  # PyTorch-Default belassen
+
+    def _init(m):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            if scheme == "kaiming_normal":
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+            elif scheme == "xavier_normal":
+                nn.init.xavier_normal_(m.weight)
+            else:
+                raise ValueError(f"Unbekanntes Init-Schema: {scheme}")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    model.apply(_init)
+
+
+init_schemes = ["default", "kaiming_normal", "xavier_normal"]
+history_h9_runs = {}
+results_h9_runs = {}
+
+for scheme in init_schemes:
+    print(f"\n{'='*60}")
+    print(f"H9 BaseCNN mit Init-Schema: {scheme}")
+    print(f"{'='*60}")
+
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"h9-init-{scheme}",
+        config={
+            "architecture": "BaseCNN",
+            "optimizer": "SGD",
+            "lr": best_lr,
+            "momentum": 0.0,
+            "weight_decay": 0.0,
+            "batch_size": best_bs,
+            "epochs": PHASE2_EPOCHS,
+            "init_scheme": scheme,
+            "experiment": "h9-weight-init",
+            "hypothesis": "Kaiming Normal > Default > Xavier Normal",
+        },
+        reinit=True,
+    )
+
+    torch.manual_seed(42)
+    model_h9 = BaseCNN(NUM_CLASSES).to(device)
+    apply_init(model_h9, scheme)
+
+    optimizer_h9 = optim.SGD(model_h9.parameters(), lr=best_lr)
+
+    history_h9 = train_model(
+        model_h9,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer_h9,
+        device,
+        epochs=PHASE2_EPOCHS,
+    )
+
+    results_h9 = evaluate_model(
+        model_h9,
+        val_loader,
+        CLASS_NAMES,
+        device,
+        channel_mean,
+        channel_std,
+    )
+
+    history_h9_runs[scheme] = history_h9
+    results_h9_runs[scheme] = results_h9
+
+    peak = max(history_h9["val_acc"])
+    print(
+        f"\ninit={scheme} | Peak Val Acc: {peak:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+    wandb.finish()
+
+print("\n--- Zusammenfassung H9 Gewichts-Initialisierung ---")
+for scheme in init_schemes:
+    peak = max(history_h9_runs[scheme]["val_acc"])
+    last = history_h9_runs[scheme]["val_acc"][-1]
+    print(
+        f"init={scheme:<18} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H9-Gewichts-Initialisierung--VmlldzoxNjY1NDQ1NQ" style="border:none;height:1024px;width:100%">
+
+## Hypothese 10: Adam Optimizer
+
+**Hypothesen:**
+
+1. Mit dem Adam Optimizer (adaptive Lernraten pro Parameter plus Momentum) erreicht das Netz in weniger Epochen ein hohes Val Accuracy Niveau als mit SGD, weil Adam die Schrittweite pro Parameter automatisch an den Gradientenverlauf anpasst.
+2. Peak Val Accuracy liegt auf ähnlichem oder leicht höherem Niveau als die SGD Baseline, der Hauptvorteil von Adam ist aber die Konvergenzgeschwindigkeit und weniger manuelles Lernraten-Tuning.
+3. Der Generalization Gap fällt bei Adam tendenziell grösser aus, weil die adaptive Skalierung der Lernraten pro Parameter das Fitten der Trainingsdaten beschleunigt und damit leichter zu Overfitting führt.
+4. Die optimale Lernrate für Adam liegt deutlich unter dem SGD `best_lr` (0.05). Übliche Adam-Werte sind 1e-4 bis 3e-3, daher wird eine kleine Grid Studie durchgeführt.
+
+**Begründung:** Adam kombiniert Momentum (erster Moment) mit einer Normalisierung durch die quadrierten Gradienten (zweiter Moment) und ist damit robust gegenüber unterschiedlich skalierten Gradienten in verschiedenen Parametern. Das macht Adam sehr beliebt als "Default-Optimizer" in vielen CNNs. Da SGD ohne Momentum trainiert wird, sollte Adam hier einen spürbaren Vorteil zumindest in der Startphase zeigen. Die SGD-Lernrate 0.05 ist für Adam viel zu gross, deshalb werden mehrere Kandidaten getestet (1e-4, 5e-4, 1e-3, 3e-3).
+
+**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+Gleicher `BaseCNN` wie in der Phase 2 Baseline, aber der Optimizer ist `torch.optim.Adam` statt `SGD`. Getestet werden vier Lernraten: `1e-4`, `5e-4`, `1e-3` (PyTorch-Default), `3e-3`. Alle übrigen Bedingungen bleiben identisch zur Phase 2 Baseline (`bs=best_bs`, 50 Epochen, kein Weight Decay, identischer Train Loader mit Baseline Augmentation). Jede Lernrate läuft als eigener W&B Run, am Ende wird `best_lr_adam` bestimmt und für den Fazit-Vergleich mit der Baseline verwendet.
+
+```{python}
+# H10: Adam Optimizer mit Grid Studie ueber Lernraten
+adam_lrs = [1e-4, 5e-4, 1e-3, 3e-3]
+history_h10_runs = {}
+results_h10_runs = {}
+
+for lr in adam_lrs:
+    print(f"\n{'='*60}")
+    print(f"H10 Adam mit lr={lr:.0e}")
+    print(f"{'='*60}")
+
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"h10-adam-lr-{lr:.0e}",
+        config={
+            "architecture": "BaseCNN",
+            "optimizer": "Adam",
+            "lr": lr,
+            "betas": (0.9, 0.999),
+            "eps": 1e-8,
+            "weight_decay": 0.0,
+            "batch_size": best_bs,
+            "epochs": PHASE2_EPOCHS,
+            "experiment": "h10-adam",
+            "hypothesis": "Adam schneller als SGD, Gap tendenziell groesser",
+        },
+        reinit=True,
+    )
+
+    torch.manual_seed(42)
+    model_h10 = BaseCNN(NUM_CLASSES).to(device)
+    optimizer_h10 = optim.Adam(model_h10.parameters(), lr=lr)
+
+    history_h10 = train_model(
+        model_h10,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer_h10,
+        device,
+        epochs=PHASE2_EPOCHS,
+    )
+
+    results_h10 = evaluate_model(
+        model_h10,
+        val_loader,
+        CLASS_NAMES,
+        device,
+        channel_mean,
+        channel_std,
+    )
+
+    history_h10_runs[lr] = history_h10
+    results_h10_runs[lr] = results_h10
+
+    peak = max(history_h10["val_acc"])
+    print(
+        f"\nlr={lr:.0e} | Peak Val Acc: {peak:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+    wandb.finish()
+
+print("\n--- Zusammenfassung H10 Adam ---")
+for lr in adam_lrs:
+    peak = max(history_h10_runs[lr]["val_acc"])
+    last = history_h10_runs[lr]["val_acc"][-1]
+    print(
+        f"lr={lr:.0e} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+
+best_lr_adam = max(adam_lrs, key=lambda lr: max(history_h10_runs[lr]["val_acc"]))
+print(f"\nBeste Adam Lernrate: {best_lr_adam:.0e}")
+```
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H10-Adam-Optimizer--VmlldzoxNjY1ODIzMA" style="border:none;height:1024px;width:100%">
+
+## Hypothese 11: Transfer Learning
+
+**Hypothesen:**
+
+1. Ein auf ImageNet vortrainiertes `ResNet18` erreicht bereits mit **Feature Extraction** (Backbone eingefroren, nur neuer FC-Kopf trainiert) eine höhere Val Accuracy als die from-scratch `BaseCNN`. Low- und Mid-Level-Features aus ImageNet (Kanten, Texturen, einfache Objektteile) sind auf Natur- und Stadt-Szenen übertragbar, auch bei reduzierter Eingabegrösse.
+2. **Fine-Tuning** (alle Layer trainierbar, kleinere Lernrate) schlägt reine Feature Extraction, weil die späteren Layer in ResNet18 auf die 1000 ImageNet-Klassen spezialisiert sind und sich auf die 6 Intel-Klassen anpassen müssen.
+3. Transfer Learning konvergiert in **deutlich weniger Epochen** als die from-scratch BaseCNN, weil der Startpunkt bereits nützliche Repräsentationen enthält.
+4. Der Generalization Gap bleibt moderat, weil die vortrainierten Gewichte eine Art "implizite Regularisierung" darstellen.
+
+**Begründung:** Bei kleinen Datensätzen (~14k Bilder) ist es in der Praxis fast immer besser, von einem vortrainierten Backbone zu starten, statt von Grund auf zu trainieren. ResNet18 ist ein gängiger Kompromiss zwischen Kapazität und Laufzeit. Damit der Vergleich zur from-scratch Baseline fair bleibt, wird die Eingabegrösse auf **64x64** belassen (identisch zur Baseline und zu allen anderen Phase 2 Experimenten). ResNet18 ist zwar auf 224x224 trainiert, funktioniert aber dank `AdaptiveAvgPool2d` vor dem FC-Kopf auch mit kleineren Eingaben, wobei die räumliche Auflösung in den Feature Maps klar geringer ausfällt. Das ist eine bewusste Einschränkung dieses Experiments und wird in der Reflexion berücksichtigt. Normalisiert wird mit den Datensatz-eigenen `channel_mean` / `channel_std`, ebenfalls um identisch zur Baseline zu bleiben. Es werden zwei Varianten verglichen: `feature-extract` (Backbone eingefroren, Adam lr=1e-3 auf dem FC-Kopf) und `finetune` (alle Layer trainierbar, Adam lr=1e-4 auf dem gesamten Netz).
+
+**Kursreferenz:** `transfer_learning.pdf`, `imagenet_architectures.pdf`
+
+### Experiment
+
+Damit der Vergleich zur Phase 2 Baseline fair bleibt, werden **exakt dieselben** DataLoader (`train_loader`, `val_loader`, 64x64, Datensatz-Normalisierung) wie bei allen anderen Hypothesen verwendet. Es werden keine neuen Transforms aufgesetzt.
+
+Es werden zwei Konfigurationen trainiert:
+
+- `h11-resnet18-feature-extract`: Backbone eingefroren, nur neuer FC-Kopf (`Linear(512, 6)`) trainiert. Adam lr=1e-3 auf dem FC-Kopf.
+- `h11-resnet18-finetune`: Alle Layer trainierbar, neuer FC-Kopf. Adam lr=1e-4 auf allen Parametern, damit die vortrainierten Features nicht zerstört werden.
+
+Beide Varianten laufen über `PHASE2_EPOCHS` (=50), damit sie mit allen vorherigen Phase 2 Experimenten vergleichbar bleiben.
+
+```{python}
+# H11: Transfer Learning mit ResNet18 (ImageNet pretrained)
+# Verwendet bewusst dieselbe 64x64-Eingabe und dieselben DataLoader wie die Baseline,
+# damit der Vergleich zu allen anderen Phase 2 Hypothesen fair bleibt.
+from torchvision.models import resnet18, ResNet18_Weights
+
+
+def build_resnet18(num_classes, freeze_backbone):
+    """ResNet18 mit ImageNet-Vorgewichten, neuem FC-Kopf fuer 6 Klassen."""
+    model = resnet18(weights=ResNet18_Weights.DEFAULT)
+    if freeze_backbone:
+        for p in model.parameters():
+            p.requires_grad = False
+    # Neuer FC-Kopf (wird immer trainiert, auch bei feature-extract)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+
+# (Name, freeze_backbone, lr)
+tl_configs = [
+    ("feature-extract", True, 1e-3),
+    ("finetune", False, 1e-4),
+]
+history_h11_runs = {}
+results_h11_runs = {}
+
+for name, freeze, lr in tl_configs:
+    print(f"\n{'='*60}")
+    print(f"H11 ResNet18 {name} (lr={lr:.0e}, freeze_backbone={freeze})")
+    print(f"{'='*60}")
+
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"h11-resnet18-{name}",
+        config={
+            "architecture": "ResNet18-pretrained",
+            "optimizer": "Adam",
+            "lr": lr,
+            "batch_size": best_bs,
+            "epochs": PHASE2_EPOCHS,
+            "img_size": IMG_SIZE,
+            "freeze_backbone": freeze,
+            "pretrained_weights": "ImageNet",
+            "experiment": "h11-transfer-learning",
+            "hypothesis": "Pretrained ResNet18 schlaegt from-scratch BaseCNN",
+        },
+        reinit=True,
+    )
+
+    torch.manual_seed(42)
+    model_h11 = build_resnet18(NUM_CLASSES, freeze_backbone=freeze).to(device)
+
+    # Nur Parameter mit requires_grad an den Optimizer
+    trainable_params = [p for p in model_h11.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable_params)
+    n_total = sum(p.numel() for p in model_h11.parameters())
+    print(f"Trainierbare Parameter: {n_trainable:,} / {n_total:,}")
+
+    optimizer_h11 = optim.Adam(trainable_params, lr=lr)
+
+    history_h11 = train_model(
+        model_h11,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer_h11,
+        device,
+        epochs=PHASE2_EPOCHS,
+    )
+
+    results_h11 = evaluate_model(
+        model_h11,
+        val_loader,
+        CLASS_NAMES,
+        device,
+        channel_mean,
+        channel_std,
+    )
+
+    history_h11_runs[name] = history_h11
+    results_h11_runs[name] = results_h11
+
+    peak = max(history_h11["val_acc"])
+    print(
+        f"\n{name} | Peak Val Acc: {peak:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+    wandb.finish()
+
+print("\n--- Zusammenfassung H11 Transfer Learning ---")
+for name, _, _ in tl_configs:
+    peak = max(history_h11_runs[name]["val_acc"])
+    last = history_h11_runs[name]["val_acc"][-1]
+    print(
+        f"{name} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
+    )
+
+best_tl_name = max(
+    [c[0] for c in tl_configs],
+    key=lambda n: max(history_h11_runs[n]["val_acc"]),
+)
+print(f"\nBeste Transfer Learning Variante: {best_tl_name}")
+```
+
 ### Analyse und Reflexion
 
-_Nach dem Training ausfüllen. Im W&B Report die Runs `phase2-baseline` und `h5-dropout-0.5` als Vergleich darstellen: Train/Val Loss, Train/Val Accuracy, Generalization Gap._
-
-**Beobachtung:**
-
-- ...
-
-**Abgleich mit Hypothese:**
-
-- ...
-
-**Einordnung:**
-
-- ...
+_Wird nach dem Lauf ergänzt._
 
