@@ -29,6 +29,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import seaborn as sns
+import copy
+import pickle
 
 # PyTorch
 import torch
@@ -38,6 +40,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as transforms
 from torch.utils.data import TensorDataset
+from torchvision.models import resnet18, ResNet18_Weights
 
 # HuggingFace datasets
 from datasets import load_dataset, load_from_disk
@@ -45,6 +48,7 @@ from datasets import load_dataset, load_from_disk
 # Scikit-learn (metrics, cross-validation)
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.metrics import confusion_matrix, classification_report
+from scipy import stats as scipy_stats
 
 # Experiment tracking
 import wandb
@@ -54,9 +58,27 @@ import os
 import time
 from pathlib import Path
 
-# GLobal variables
+# GLobal variablen
 RANDOM_SEED = 42
 DATA_DIR = Path("../data/intel-image-classification")
+PHASE2_EPOCHS = 50
+BATCH_SIZE = 64
+IMG_SIZE = 64  # Muss mit transforms.Resize übereinstimmen
+NUM_CLASSES = 6
+LR_EPOCHS = 100
+BS_EPOCHS = 100
+
+K_FOLDS = 5
+CV_EPOCHS = 100
+
+
+SWEEP_PATH = (
+    "mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/oeiyw1i9"
+)
+SWEEP_CACHE = Path("../data/sweep_oeiyw1i9_runs.pkl")
+
+SEEDS = [42, 7, 123]
+PHASE_FINAL_EPOCHS = PHASE2_EPOCHS  # 50 Epochen, identisch zu allen Phase-2-Hypothesen
 
 # Set random seeds for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -127,8 +149,8 @@ Sowohl das Train als auch das Test Datafram hat eine ausgewogene Klassenverteilu
 - Test Dataset:
   - Die `glacier` Klasse hat am meisten ausprägungen mit ca. 560 Bilder.
   - Die `buildings` Klasse hat am wenigsten ausprägungen mit 440 Bildern. 
-
-Bei der Evaluation von dem Modellen werde ich beachten ob die kleineren Klassendichten bei `buildings` und `sea` einen Einfluss auf deren Performance haben durch Klassenbezogene Metriken (Precicion, Recall und F1). 
+  
+Die Klassenimbalance ist moderat und sollte keine Auswirkungen auf die Modelle haben. 
 
 ### Beispielbilder
 
@@ -155,10 +177,10 @@ plt.show()
 ### Fazit Beispielbilder pro Klasse
 
 Meine vorhersage für die Modelle ist: 
-- Die Klasse `forest` wird wahrscheinlich am einfachstenzu unterscheiden sein. 
+- Die Klasse `forest` wird wahrscheinlich am einfachstenzu unterscheiden sein: Vertikale kanten und grün dominant. 
 - Die Klassen `buildings` und `street` könnten Problematisch zu unterscheiden sein. Bei dem ersten Beispielbild von `street` sieht man auch Gebäude was schwer zu unterscheiden sein kann für das Modell.
 - Auch die Klassen `glacier` und `mountain` können schwer vorhersagbar sein für das Modell, da bei den `glacier` Beispielbildern auch Berge zu sehen sind. 
-- Bei dem ersten Beispielbild von `sea` ist zu erkennen, dass der Datensatz auch Schwarz-Weiss Bilder enthält. Das Modell kann sich somit nicht lediglich auf die Farbkanäle verlassen. 
+- Bei dem ersten Beispielbild von `sea` und `building` ist zu erkennen, dass der Datensatz auch Schwarz-Weiss Bilder enthält. Das Modell kann sich somit nicht lediglich auf die Farbkanäle verlassen. 
 
 ### Bildgrössen und Pixelwerte
 
@@ -257,9 +279,8 @@ for class_name, data in summary.items():
 
 **Implikationen für das Modell:**
 
-1. **Farbinformation ist notwendig, aber nicht hinreichend.** Während Forest anhand der Farbverteilung gut trennbar ist, muss das CNN für die Unterscheidung von Glacier/Mountain/Sea auf **Textur- und Strukturmerkmale** (Kanten, Muster, räumliche Frequenzen) zurückgreifen. Das zeigt, wie wichtig die Convolutional Layers sind.
-2. **Normalisierung ist wichtig.** Die Mittelwerte weichen deutlich von 128 (Mitte des [0, 255]-Bereichs) ab und unterscheiden sich zwischen den Kanälen. Eine kanalweise Normalisierung (z.B. mit den berechneten Mittelwerten und Standardabweichungen) hilft dem Modell, schneller zu konvergieren, da die Eingabedaten zentriert und skaliert werden.
-3. **Verwechslungsrisiken** sind vorhersehbar: Die Confusion Matrix wird vermutlich erhöhte Verwechslungsraten zwischen Glacier ↔ Mountain ↔ Sea sowie zwischen Buildings ↔ Street zeigen. Dies haben ich bereits in den Beispielbildern zum Teil vorhergesagt. 
+1. **Farbinformation ist notwendig, aber nicht hinreichend.** Während `Forest` anhand der Farbverteilung gut trennbar ist, muss das CNN für die Unterscheidung von Glacier/Mountain/Sea auf **Textur- und Strukturmerkmale** (Kanten, Muster, räumliche Frequenzen) zurückgreifen. Dies muss anhand der Convulutional Layern entnommen werden
+2. **Normalisierung ist wichtig.** Die Mittelwerte weichen deutlich von 128 (Mitte des [0, 255]-Bereichs) ab und unterscheiden sich zwischen den Kanälen. Eine kanalweise Normalisierung hilft dem Modell, schneller zu konvergieren, da die Eingabedaten zentriert und skaliert werden.
 
 ## Preprocessing
 
@@ -319,9 +340,7 @@ print(f"Channel stds  (nur Train-Split): {channel_std}")
 # Train: RandomResizedCrop + HorizontalFlip als Data Augmentation
 transform_train = transforms.Compose(
     [
-        transforms.RandomResizedCrop(
-            64, scale=(0.4, 1.0)
-        ),  # TODO Fragen ob bei Etappe bereits erlaubt ist.
+        transforms.RandomResizedCrop(64, scale=(0.4, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),  # PIL -> Tensor [0,1], HWC -> CHW
         transforms.Normalize(mean=channel_mean.tolist(), std=channel_std.tolist()),
@@ -366,7 +385,7 @@ class IntelImageDataset(torch.utils.data.Dataset):
 
 ### Train/Validation/Test-Split
 
-train_indices und val_indices wurden bereits oben erstellt (80/20, stratifiziert). Hier werden die HuggingFace-Subsets und PyTorch Datasets daraus erzeugt. Das Testset bleibt unverändert.
+`train_indices` und `val_indices` wurden bereits oben erstellt (80/20, stratifiziert). Hier werden die HuggingFace-Subsets und PyTorch Datasets daraus erzeugt. Das Testset bleibt unverändert.
 
 ```{python}
 # train_indices und val_indices wurden oben bei der Kanal-Statistik-Berechnung erstellt
@@ -388,15 +407,13 @@ DataLoader für Train, Validation und Test mit initialer Batch-Size von 64. Sani
 
 ```{python}
 # DataLoaders erstellen
-BATCH_SIZE = 64
-
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 # Sanity Check: ein Batch laden
 images, labels = next(iter(train_loader))
-print(f"Batch shape: {images.shape}")  # [64, 3, 150, 150]
+print(f"Batch shape: {images.shape}")  # [64, 3, 64, 64]
 print(f"Labels shape: {labels.shape}")  # [64]
 print(f"Pixel range:  [{images.min():.2f}, {images.max():.2f}]")
 ```
@@ -419,7 +436,6 @@ print(f"Device: {device}")
 criterion = nn.CrossEntropyLoss()
 
 # Klassennamen
-NUM_CLASSES = 6
 CLASS_NAMES = dataset["train"].features["label"].names
 print(f"Klassen ({NUM_CLASSES}): {CLASS_NAMES}")
 ```
@@ -486,9 +502,31 @@ def train_model(
     device,
     epochs,
     log_wandb=True,
+    return_best_state=False,
 ):
-    """Kompletter Trainingsloop mit optionalem W&B-Logging. Gibt History-Dict zurück."""
-    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    """Kompletter Trainingsloop mit Best-Val-Acc-Checkpointing.
+
+    Loggt zusaetzlich `val_acc_best` pro Epoche zu W&B und im History-Dict, damit
+    die "Last-Epoch-Problematik" aus H1/H3/H5 strukturell gelöst ist: das
+    Endergebnis wird nicht mehr von der letzten Epoche dominiert, sondern von der
+    besten beobachteten.
+
+    Wenn `return_best_state=True`, wird zusätzlich das State-Dict der besten
+    Epoche zurückgegeben, damit der Aufrufer das Modell auf den Peak
+    zurücksetzen kann. Default False, um Speicher zu sparen und die Signatur
+    der Phase-1/2-Hypothesen-Zellen unverändert zu lassen.
+    """
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+        "val_acc_best": [],
+        "best_epoch": [],
+    }
+    best_val_acc = 0.0
+    best_epoch = 0
+    best_state = None
     start_time = time.time()
 
     for epoch in range(epochs):
@@ -497,10 +535,18 @@ def train_model(
         )
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch
+            if return_best_state:
+                best_state = copy.deepcopy(model.state_dict())
+
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
+        history["val_acc_best"].append(best_val_acc)
+        history["best_epoch"].append(best_epoch)
 
         if log_wandb:
             wandb.log(
@@ -510,19 +556,26 @@ def train_model(
                     "train_acc": train_acc,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
+                    "val_acc_best": best_val_acc,
+                    "best_epoch": best_epoch,
                 }
             )
 
         print(
-            f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f}"
+            f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f} | "
+            f"Best {best_val_acc:.4f}@{best_epoch}"
         )
 
     elapsed = time.time() - start_time
     minutes, seconds = divmod(elapsed, 60)
     print(
-        f"\nTraining abgeschlossen in {int(minutes)}m {seconds:.1f}s ({epochs} Epochen, {elapsed/epochs:.2f}s/Epoche)"
+        f"\nTraining abgeschlossen in {int(minutes)}m {seconds:.1f}s "
+        f"({epochs} Epochen, {elapsed/epochs:.2f}s/Epoche)"
     )
 
+    if return_best_state:
+        return history, best_state
     return history
 
 
@@ -564,8 +617,10 @@ def plot_training(history, title="Lernkurven"):
   - Precision
   - Recall
   - F1-Score
-- **Top-Loss Samples**: Zeigt die Beispiele bei denen das Modell die grössten Schwierigkeiten hatte.
+- **Top-Loss Samples**: Zeigt die Bilder bei denen das Modell die grössten Schwierigkeiten hatte.
 - **Cross-Validation Boxplot**: wie stabil das Modell über verschiedene Folds hinweg performt.
+
+> Im Verlauf der Implementierung habe ich immer wie mehr auf W&B Plots gesetzt.
 
 ```{python}
 def denormalize(tensor, mean, std):
@@ -697,7 +752,7 @@ def evaluate_model(
             }
         )
 
-        # Top-Loss Samples als Table mit Bildern → sortierbares Panel im Report
+        # Top-Loss Samples als Table mit Bildern -> sortierbares Panel im Report
         # Zusaetzliche Spalte "run" erleichtert Zuordnung beim Vergleich mehrerer Modelle.
         run_name = wandb.run.name if wandb.run is not None else "unknown"
         top_idx = np.argsort(results["losses"])[-top_n_loss:][::-1]
@@ -724,188 +779,13 @@ def evaluate_model(
     return results
 ```
 
-### Hyperparameter-Vergleichs-Visualisierungen
-
-- **Vergleichsplot für Loss und Accuracy**: zeigt, wie sich verschiedene Hyperparameterwerte über die Epochen hinweg auf Trainings- und Validierungsleistung auswirken.
-- **Beste Validation Accuracy pro Hyperparameterwert**: Balkendiagramm, das den besten erreichten Validierungswert pro getesteter Konfiguration darstellt.
-- **Generalization Gap im Hyperparametervergleich**: zeigt für verschiedene Hyperparameterwerte den Unterschied zwischen Validierungs- und Trainings-Loss und hilft, Overfitting zu erkennen.
-
-```{python}
-def plot_hp_comparison(histories, hp_name="hp", hp_label="Hyperparameter"):
-    """Vergleichsplot: Train (solid) + Val (gestrichelt) fuer Loss und Accuracy."""
-    colors = plt.cm.tab10(np.linspace(0, 0.8, len(histories)))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    for (hp_val, hist), color in zip(histories.items(), colors):
-        epochs = range(len(hist["train_loss"]))
-        ax1.plot(
-            epochs,
-            hist["train_loss"],
-            "-",
-            color=color,
-            alpha=0.7,
-            label=f"{hp_name}={hp_val}",
-        )
-        ax1.plot(epochs, hist["val_loss"], "--", color=color, alpha=0.7)
-        ax2.plot(
-            epochs,
-            hist["train_acc"],
-            "-",
-            color=color,
-            alpha=0.7,
-            label=f"{hp_name}={hp_val}",
-        )
-        ax2.plot(epochs, hist["val_acc"], "--", color=color, alpha=0.7)
-
-    # Linestyle-Legende: solid=Train, dashed=Validation
-    style_handles = [
-        Line2D([0], [0], color="gray", linestyle="-", label="Train"),
-        Line2D([0], [0], color="gray", linestyle="--", label="Validation"),
-    ]
-
-    for ax, ylabel, title_suffix in [
-        (ax1, "Loss", "Loss"),
-        (ax2, "Accuracy", "Accuracy"),
-    ]:
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel(ylabel)
-        ax.set_title(f"{hp_label}-Tuning — {title_suffix}")
-        handles, _ = ax.get_legend_handles_labels()
-        ax.legend(handles=handles + style_handles, fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-    return fig
-
-
-def plot_hp_best_accuracy(histories, hp_name="hp", hp_label="Hyperparameter"):
-    """Balkendiagramm: Beste Validation Accuracy pro HP-Wert mit Epoche."""
-    hp_vals = list(histories.keys())
-    best_accs = [max(h["val_acc"]) for h in histories.values()]
-    best_epochs = [int(np.argmax(h["val_acc"])) for h in histories.values()]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(range(len(hp_vals)), best_accs, color="#2196F3", alpha=0.8)
-    ax.set_xticks(range(len(hp_vals)))
-    ax.set_xticklabels([f"{hp_name}={v}" for v in hp_vals], rotation=45, ha="right")
-    ax.set_ylabel("Best Validation Accuracy")
-    ax.set_title(f"{hp_label}-Tuning — Beste Validation Accuracy")
-    ax.set_ylim(min(best_accs) - 0.05, max(best_accs) + 0.03)
-    ax.grid(True, alpha=0.3, axis="y")
-
-    for bar, acc, epoch in zip(bars, best_accs, best_epochs):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.005,
-            f"{acc:.3f}\n(Ep. {epoch})",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-    # Besten Balken hervorheben
-    best_idx = int(np.argmax(best_accs))
-    bars[best_idx].set_color("#4CAF50")
-
-    plt.tight_layout()
-    plt.show()
-    return fig
-
-
-def plot_hp_gap_comparison(histories, hp_name="hp", hp_label="Hyperparameter"):
-    """Generalization Gap (Val Loss - Train Loss) im Vergleich ueber mehrere HP-Werte."""
-    colors = plt.cm.tab10(np.linspace(0, 0.8, len(histories)))
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    for (hp_val, hist), color in zip(histories.items(), colors):
-        epochs = range(len(hist["train_loss"]))
-        gap = [v - t for t, v in zip(hist["train_loss"], hist["val_loss"])]
-        ax.plot(epochs, gap, color=color, linewidth=1.5, label=f"{hp_name}={hp_val}")
-
-    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Val Loss - Train Loss")
-    ax.set_title(f"{hp_label}-Tuning — Generalization Gap")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-    return fig
-```
-
 ### Cross-Validation-Visualisierungen
 
-- **Mean ± Std Band für Loss und Accuracy**: zeigt den durchschnittlichen Trainings- und Validierungsverlauf über alle Folds hinweg sowie die Streuung der Ergebnisse.
 - **Per-Class Accuracy pro Fold**: gruppiertes Balkendiagramm, das die Accuracy jeder Klasse für jeden einzelnen Fold darstellt.
 - **Mean ± Std der Per-Class Accuracy**: ergänzt die klassenweisen Fold-Ergebnisse durch den Mittelwert und die Standardabweichung, um die Stabilität der Klassenleistung über alle Folds hinweg sichtbar zu machen.
 
 ```{python}
-def plot_cv_mean_std_band(fold_results, title_prefix="Cross-Validation"):
-    """Mean +/- Std Band ueber alle Folds fuer Loss und Accuracy."""
-    n_epochs = min(len(r["history"]["val_loss"]) for r in fold_results)
-
-    # Sammle Metriken pro Epoche
-    val_losses = np.array([r["history"]["val_loss"][:n_epochs] for r in fold_results])
-    val_accs = np.array([r["history"]["val_acc"][:n_epochs] for r in fold_results])
-    train_losses = np.array(
-        [r["history"]["train_loss"][:n_epochs] for r in fold_results]
-    )
-    train_accs = np.array([r["history"]["train_acc"][:n_epochs] for r in fold_results])
-    epochs = np.arange(n_epochs)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Loss
-    for data, color, label in [
-        (train_losses, "#2196F3", "Train"),
-        (val_losses, "#E53935", "Validation"),
-    ]:
-        mean = data.mean(axis=0)
-        std = data.std(axis=0)
-        ax1.plot(epochs, mean, color=color, linewidth=2, label=f"{label} (Mean)")
-        ax1.fill_between(
-            epochs,
-            mean - std,
-            mean + std,
-            color=color,
-            alpha=0.15,
-            label=f"{label} (±1 Std)",
-        )
-
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax1.set_title(f"{title_prefix} — Loss (Mean ± Std)")
-    ax1.legend(fontsize=8)
-    ax1.grid(True, alpha=0.3)
-
-    # Accuracy
-    for data, color, label in [
-        (train_accs, "#2196F3", "Train"),
-        (val_accs, "#E53935", "Validation"),
-    ]:
-        mean = data.mean(axis=0)
-        std = data.std(axis=0)
-        ax2.plot(epochs, mean, color=color, linewidth=2, label=f"{label} (Mean)")
-        ax2.fill_between(
-            epochs,
-            mean - std,
-            mean + std,
-            color=color,
-            alpha=0.15,
-            label=f"{label} (±1 Std)",
-        )
-
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title(f"{title_prefix} — Accuracy (Mean ± Std)")
-    ax2.legend(fontsize=8)
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-    return fig
+# Per-Class Accuracy pro Fold und Mean ± Std der Per-Class Accuracy
 
 
 def plot_cv_per_class_accuracy(
@@ -978,9 +858,6 @@ Architektur für 64x64x3 Bilder (Resize zur Verkürzung der Trainingszeit):
 - Die Linear-Layer-Grösse wird automatisch aus der Bildgrösse berechnet
 
 ```{python}
-IMG_SIZE = 64  # Muss mit transforms.Resize übereinstimmen
-
-
 class BaseCNN(nn.Module):
     def __init__(self, num_classes=6, img_size=IMG_SIZE):
         super().__init__()
@@ -1032,7 +909,6 @@ Laut Aufgabenstellung (Punkt 3d): Trainiere auf einem einzelnen Batch. Der Loss 
 
 ```{python}
 # Overfitting-Test: ein einzelner Batch, 200 Iterationen mit höherer LR
-# Verwendet train_model() und evaluate(), um gleichzeitig den Training-Loop zu validieren.
 
 overfit_model = BaseCNN(NUM_CLASSES).to(device)
 overfit_optimizer = optim.SGD(overfit_model.parameters(), lr=0.05)
@@ -1063,10 +939,10 @@ final_acc = history_overfit["train_acc"][-1]
 print(f"\nFinal Loss: {final_loss:.6f} | Final Acc: {final_acc:.4f}")
 if final_loss < 0.01 and final_acc > 0.99:
     print(
-        "BESTANDEN — Modell kann einen Batch overfitten. Training-Loop funktioniert korrekt."
+        "BESTANDEN: Modell kann einen Batch overfitten. Training-Loop funktioniert korrekt."
     )
 else:
-    print("NICHT BESTANDEN — Loss konvergiert nicht gegen 0.")
+    print("NICHT BESTANDEN: Loss konvergiert nicht gegen 0.")
 ```
 
 ### Beobachtungen Overfitting-Test
@@ -1109,7 +985,7 @@ history_base = train_model(
 
 ### Evaluation Basismodell
 
-Vollständige Evaluation auf dem Validierungsset. Alle Rohdaten (Confusion Matrix, Per-Class Precision/Recall/F1, Top-Loss Samples inkl. Bilder) werden zu W&B geloggt und ausschliesslich im **W&B-Report** interaktiv dargestellt — im Notebook werden keine Plots mehr erzeugt.
+Vollständige Evaluation auf dem Validierungsset. Alle Rohdaten (Confusion Matrix, Per-Class Precision/Recall/F1, Top-Loss Samples inkl. Bilder) werden zu W&B geloggt und ausschliesslich im **W&B-Report** interaktiv dargestellt. Im Notebook werden keine Plots mehr erzeugt.
 
 ```{python}
 # Vollständige Evaluation des Basismodells auf dem Validierungsset
@@ -1136,7 +1012,6 @@ Wir testen mehrere Lernraten (0.001, 0.005, 0.01, 0.05, 0.1) mit SGD ohne Moment
 # LR-Tuning: mehrere Lernraten vergleichen
 learning_rates = [0.001, 0.005, 0.01, 0.05, 0.1]
 lr_histories = {}
-LR_EPOCHS = 100
 
 for lr in learning_rates:
     print(f"\n{'='*60}")
@@ -1176,7 +1051,7 @@ for lr in learning_rates:
 
 ### Beste Lernrate
 
-Wir ermitteln die beste Lernrate und loggen ein interaktives Bar-Chart (`wandb.plot.bar`) mit der Best Validation Accuracy pro Lernrate. Train-/Val-Loss- und Accuracy-Kurven aus den einzelnen Runs werden direkt im W&B-Report als Line-Plots nachgebaut; Generalization-Gap-Panels ebenfalls.
+Wir ermitteln die beste Lernrate mit der Best Validation Accuracy pro Lernrate. Train-/Val-Loss- und Accuracy-Kurven aus den einzelnen Runs werden direkt im W&B-Report als Line-Plots nachgebaut; Generalization-Gap-Panels ebenfalls.
 
 ```{python}
 # Beste Lernrate ermitteln
@@ -1230,7 +1105,6 @@ Wir testen verschiedene Batch-Sizes (16, 32, 64, 128) mit der besten Lernrate au
 # Batch-Size-Tuning mit bester LR
 batch_sizes = [16, 32, 64, 128]
 bs_histories = {}
-BS_EPOCHS = 100
 
 for bs in batch_sizes:
     print(f"\n{'='*60}")
@@ -1274,7 +1148,7 @@ for bs in batch_sizes:
 
 ### Beste Batch-Size
 
-Best Validation Accuracy pro Batch-Size als interaktives Bar-Chart (`wandb.plot.bar`). Train-/Val-Loss- und Accuracy-Kurven sowie Generalization-Gap werden im W&B-Report aus den per-run-Logs nachgebaut.
+Best Validation Accuracy pro Batch-Size. Train-/Val-Loss- und Accuracy-Kurven sowie Generalization-Gap werden im W&B-Report aus den per-run-Logs nachgebaut.
 
 ```{python}
 # Beste Batch-Size ermitteln
@@ -1284,7 +1158,7 @@ best_bs_epoch = int(np.argmax(bs_histories[best_bs]["val_acc"]))
 print(
     f"\nBeste Batch-Size: {best_bs} (Val Accuracy: {best_bs_acc:.4f}, Epoche {best_bs_epoch})"
 )
-print(f"Beste Hyperparameter fuer Stage 1: lr={best_lr}, batch_size={best_bs}")
+print(f"Beste Hyperparameter für Stage 1: lr={best_lr}, batch_size={best_bs}")
 
 # W&B Summary-Run: interaktives Bar-Chart via wandb.plot.bar
 run = wandb.init(
@@ -1323,12 +1197,42 @@ wandb.finish()
 
 ## Schritt 8: Cross-Validation (Statistischer Fehler)
 
-5-Fold Cross-Validation auf dem gesamten Trainingsset mit den besten Hyperparametern. Ziel: Schätzung der Generalisierungsperformance mit Mittelwert und Standardabweichung.
+5-Fold Cross-Validation auf dem gesamten Trainingsset mit den besten Hyperparametern. Ziel: Schätzung der Generalisierungs-Performance mit **Mittelwert** und einer korrekten Quantifizierung der Unsicherheit dieser Schätzung (**statistischer Fehler**).
+
+### Standardabweichung vs. Standardfehler — was ist der "statistische Fehler"?
+
+Bei K-Fold Cross-Validation erhalten wir K Accuracy-Werte (einen pro Fold) $a_1, a_2, \dots, a_K$. Daraus berechnen wir:
+
+**Mittelwert** (Punktschätzung der Generalisierungs-Accuracy):
+
+$$\bar{a} = \frac{1}{K}\sum_{i=1}^{K} a_i$$
+
+**Stichproben-Standardabweichung** (SD) — beschreibt die *Streuung der einzelnen Fold-Accuracies* um den Mittelwert. Sie sagt aus, wie stark die Modell-Performance je nach Fold schwankt:
+
+$$\mathrm{SD} = \sqrt{\frac{1}{K-1}\sum_{i=1}^{K} (a_i - \bar{a})^2}$$
+
+**Standardfehler des Mittelwerts** (SE oder SEM) — beschreibt die *Unsicherheit der Schätzung von $\bar{a}$ selbst*. Das ist der **statistische Fehler** im Sinne der Aufgabenstellung:
+
+$$\mathrm{SE} = \frac{\mathrm{SD}}{\sqrt{K}}$$
+
+**95 %-Konfidenzintervall** (über die t-Verteilung, da K klein):
+
+$$\mathrm{CI}_{95\%} = \bar{a} \pm t_{0.975,\,K-1} \cdot \mathrm{SE}$$
+
+**Unterschied auf den Punkt gebracht:**
+
+| Grösse | Was sie misst | Verhalten bei mehr Folds |
+|---|---|---|
+| **SD** | Streuung der Fold-Performance | bleibt etwa konstant (Eigenschaft der Daten/Modell-Stabilität) |
+| **SE** | Unsicherheit unserer Mittelwert-Schätzung | wird kleiner ($\propto 1/\sqrt{K}$), je mehr Folds wir mitteln |
+
+Der **statistische Fehler** der CV-Schätzung ist also der **SE**, nicht die SD. Die SD ist trotzdem nützlich, weil sie zeigt, wie stabil das Modell über verschiedene Datensplits hinweg ist.
+
+**Wichtige Einschränkung:** Die K Folds teilen sich überlappende Trainingsdaten und sind deshalb nicht vollständig unabhängig. Die Formel $\mathrm{SE} = \mathrm{SD}/\sqrt{K}$ setzt Unabhängigkeit voraus und kann den wahren Fehler tendenziell unterschätzen (vgl. Bayle et al., 2020). Für die Mini-Challenge folgen wir trotzdem der klassischen Formel und benennen die Annahme transparent.
 
 ```{python}
 # Cross-Validation: 5-Fold auf gesamtem Trainingsset
-K_FOLDS = 5
-CV_EPOCHS = 100
+
 
 # Gesamtes Trainingsset (ohne Split) für CV
 full_train_dataset = IntelImageDataset(dataset["train"], transform=transform_train)
@@ -1406,12 +1310,32 @@ for fold, (train_ids, val_ids) in enumerate(kfold.split(full_train_dataset)):
 
 ### Ergebnisse und statistischer Fehler
 
-Zusammenfassung der Cross-Validation: Accuracy pro Fold, Mittelwert und Standardabweichung als Schätzung des statistischen Fehlers.
+Wir geben pro Fold die Best- und Final-Validation-Accuracy aus, und am Ende:
+- **Mittelwert** $\bar{a}$ der Fold-Accuracies (Punktschätzung)
+- **Standardabweichung (SD)** mit $\texttt{ddof=1}$ (Stichproben-SD). Streuung über die Folds.
+- **Standardfehler (SE)** $= \mathrm{SD}/\sqrt{K}$ — der **statistische Fehler** der Mittelwert-Schätzung
+- **95 %-Konfidenzintervall** über die t-Verteilung mit $K-1$ Freiheitsgraden
 
 ```{python}
 # Cross-Validation Ergebnisse zusammenfassen
-best_accs = [r["best_val_acc"] for r in fold_results]
-final_accs = [r["final_val_acc"] for r in fold_results]
+
+best_accs = np.array([r["best_val_acc"] for r in fold_results])
+final_accs = np.array([r["final_val_acc"] for r in fold_results])
+
+K = len(best_accs)
+t_crit = scipy_stats.t.ppf(0.975, df=K - 1)  # zweiseitig, 95%
+
+
+def summarize(accs):
+    mean = accs.mean()
+    sd = accs.std(ddof=1)  # Stichproben-SD
+    se = sd / np.sqrt(len(accs))  # Standardfehler des Mittelwerts
+    ci_half = t_crit * se
+    return mean, sd, se, ci_half
+
+
+mean_best, sd_best, se_best, ci_best = summarize(best_accs)
+mean_final, sd_final, se_final, ci_final = summarize(final_accs)
 
 print("Cross-Validation Ergebnisse:")
 print(f"{'Fold':>6} | {'Best Val Acc':>12} | {'Final Val Acc':>13}")
@@ -1419,32 +1343,40 @@ print("-" * 40)
 for r in fold_results:
     print(f"{r['fold']:>6} | {r['best_val_acc']:>12.4f} | {r['final_val_acc']:>13.4f}")
 print("-" * 40)
-print(f"{'Mean':>6} | {np.mean(best_accs):>12.4f} | {np.mean(final_accs):>13.4f}")
-print(f"{'Std':>6} | {np.std(best_accs):>12.4f} | {np.std(final_accs):>13.4f}")
-
+print(f"{'Mean':>6} | {mean_best:>12.4f} | {mean_final:>13.4f}")
 print(
-    f"\nStatistischer Fehler (Best Val Acc): {np.mean(best_accs):.4f} +/- {np.std(best_accs):.4f}"
+    f"{'SD':>6} | {sd_best:>12.4f} | {sd_final:>13.4f}   (Streuung über Folds, ddof=1)"
 )
-print(f"Hyperparameter: lr={best_lr}, batch_size={best_bs}")
-
-# 1. Train + Val Lernkurven pro Fold (solid=Train, gestrichelt=Validation)
-fold_histories = {f"Fold {r['fold']}": r["history"] for r in fold_results}
-fig_folds = plot_hp_comparison(fold_histories, hp_name="", hp_label="Cross-Validation")
-
-# 2. Mean ± Std Band
-fig_band = plot_cv_mean_std_band(fold_results, title_prefix="Cross-Validation")
-
-# 3. Generalization Gap pro Fold
-fig_gap = plot_hp_gap_comparison(
-    fold_histories, hp_name="", hp_label="Cross-Validation"
+print(
+    f"{'SE':>6} | {se_best:>12.4f} | {se_final:>13.4f}   (= SD/sqrt(K), Unsicherheit des Mittels)"
 )
 
-# 4. Box-Plot der CV-Ergebnisse
+print("\n--- Best Val Acc ---")
+print(f"Mittelwert            : {mean_best:.4f}")
+print(f"Standardabweichung SD : {sd_best:.4f}   (Streuung der Fold-Accuracies)")
+print(f"Standardfehler     SE : {se_best:.4f}   (statistischer Fehler des Mittelwerts)")
+print(
+    f"95%-Konfidenzintervall: [{mean_best - ci_best:.4f}, {mean_best + ci_best:.4f}]   (t_{{0.975,{K-1}}} = {t_crit:.3f})"
+)
+print(f"\n>>> Statistischer Fehler (Mean +/- SE): {mean_best:.4f} +/- {se_best:.4f}")
+print(f">>> Zur Information         (Mean +/- SD): {mean_best:.4f} +/- {sd_best:.4f}")
+
+print("\n--- Final Val Acc ---")
+print(f"Mittelwert            : {mean_final:.4f}")
+print(f"Standardabweichung SD : {sd_final:.4f}")
+print(f"Standardfehler     SE : {se_final:.4f}")
+print(
+    f"95%-Konfidenzintervall: [{mean_final - ci_final:.4f}, {mean_final + ci_final:.4f}]"
+)
+
+print(f"\nHyperparameter: lr={best_lr}, batch_size={best_bs}")
+
+# Box-Plot der CV-Ergebnisse
 fig_box = plot_cv_boxplot(
     fold_results, title="Cross-Validation — Accuracy Distribution"
 )
 
-# 5. Per-Class Accuracy pro Fold
+# Per-Class Accuracy pro Fold
 fig_per_class = plot_cv_per_class_accuracy(
     fold_predictions,
     CLASS_NAMES,
@@ -1465,27 +1397,28 @@ run = wandb.init(
 )
 wandb.log(
     {
-        "cv/fold_learning_curves": wandb.Image(fig_folds),
-        "cv/mean_std_band": wandb.Image(fig_band),
-        "cv/generalization_gap": wandb.Image(fig_gap),
         "cv/boxplot": wandb.Image(fig_box),
         "cv/per_class_accuracy": wandb.Image(fig_per_class),
-        "cv/mean_best_acc": np.mean(best_accs),
-        "cv/std_best_acc": np.std(best_accs),
-        "cv/mean_final_acc": np.mean(final_accs),
-        "cv/std_final_acc": np.std(final_accs),
+        "cv/mean_best_acc": mean_best,
+        "cv/sd_best_acc": sd_best,
+        "cv/se_best_acc": se_best,
+        "cv/ci95_best_low": mean_best - ci_best,
+        "cv/ci95_best_high": mean_best + ci_best,
+        "cv/mean_final_acc": mean_final,
+        "cv/sd_final_acc": sd_final,
+        "cv/se_final_acc": se_final,
+        "cv/ci95_final_low": mean_final - ci_final,
+        "cv/ci95_final_high": mean_final + ci_final,
     }
 )
-for fig in [fig_folds, fig_band, fig_gap, fig_box, fig_per_class]:
+for fig in [fig_box, fig_per_class]:
     plt.close(fig)
 wandb.finish()
 ```
 
-### TODO: Standart fehler anzeigen nicht die Standart abweichung. Der einte wert ist anscheinend noch durch anzahl folds gerechnet -> Anschauen was standart fehler vs standart abweichung genau ist
-
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Cross-validation-Report--VmlldzoxNjYwMTgzNg" style="border:none;height:1024px;width:100%">
 
-# Phase 2: Hyperparameter Tuning
+# Phase 2: Hyperparameter Tuning TODO: texte überarbeiten (Nicht KI like)
 
 In dieser Phase werden 11 Hypothesen aus sieben Themengruppen untersucht: Modellkomplexitaet (Tiefe, Breite), Conv Layer Settings (Kernel Size, Pooling), Regularisierung (Dropout, Data Augmentation, Weight Decay), BatchNorm, Gewichts-Initialisierung, Adam Optimizer und Transfer Learning.
 
@@ -1511,7 +1444,7 @@ Referenz-Run fuer alle Hypothesen. BaseCNN, lr=0.05, bs=64, 50 Epochen, SGD ohne
 
 ```{python}
 # Phase 2 Baseline: wird einmal trainiert und als Referenz fuer alle Hypothesen verwendet.
-PHASE2_EPOCHS = 50
+
 
 run = wandb.init(
     project="del-mini-challenge",
@@ -1572,6 +1505,9 @@ wandb.finish()
 `DeepCNN`: vier Conv-Bloecke (16 → 32 → 64 → 128 Filter, 3x3 Kernel, MaxPool(2) nach jedem Block). FC-Teil unveraendert. Training mit identischen Bedingungen wie Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen).
 
 ```{python}
+# TODO: Fazit so anpassen, dass nun best val score verwendet wird (sollte nun automatisch geloggt werden -> muss in wandb neu visualisiert werden)
+
+
 class DeepCNN(nn.Module):
     """Vier Conv-Bloecke (16 -> 32 -> 64 -> 128) statt drei. FC-Teil unveraendert."""
 
@@ -1630,7 +1566,7 @@ run = wandb.init(
 model_h1 = DeepCNN(NUM_CLASSES).to(device)
 optimizer_h1 = optim.SGD(model_h1.parameters(), lr=best_lr)
 
-history_h1 = train_model(
+history_h1, best_state_h1 = train_model(
     model_h1,
     train_loader,
     val_loader,
@@ -1638,7 +1574,9 @@ history_h1 = train_model(
     optimizer_h1,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h1.load_state_dict(best_state_h1)
 
 results_h1 = evaluate_model(
     model_h1,
@@ -1735,7 +1673,7 @@ run = wandb.init(
 model_h2 = WideCNN(NUM_CLASSES).to(device)
 optimizer_h2 = optim.SGD(model_h2.parameters(), lr=best_lr)
 
-history_h2 = train_model(
+history_h2, best_state_h2 = train_model(
     model_h2,
     train_loader,
     val_loader,
@@ -1743,7 +1681,9 @@ history_h2 = train_model(
     optimizer_h2,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h2.load_state_dict(best_state_h2)
 
 results_h2 = evaluate_model(
     model_h2,
@@ -1841,7 +1781,7 @@ run = wandb.init(
 model_h3 = LargeKernelCNN(NUM_CLASSES).to(device)
 optimizer_h3 = optim.SGD(model_h3.parameters(), lr=best_lr)
 
-history_h3 = train_model(
+history_h3, best_state_h3 = train_model(
     model_h3,
     train_loader,
     val_loader,
@@ -1849,7 +1789,9 @@ history_h3 = train_model(
     optimizer_h3,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h3.load_state_dict(best_state_h3)
 
 results_h3 = evaluate_model(
     model_h3,
@@ -1947,7 +1889,7 @@ run = wandb.init(
 model_h4 = AvgPoolCNN(NUM_CLASSES).to(device)
 optimizer_h4 = optim.SGD(model_h4.parameters(), lr=best_lr)
 
-history_h4 = train_model(
+history_h4, best_state_h4 = train_model(
     model_h4,
     train_loader,
     val_loader,
@@ -1955,7 +1897,9 @@ history_h4 = train_model(
     optimizer_h4,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h4.load_state_dict(best_state_h4)
 
 results_h4 = evaluate_model(
     model_h4,
@@ -2058,7 +2002,7 @@ run = wandb.init(
 model_h5 = DropoutCNN(NUM_CLASSES, dropout_p=dropout_p).to(device)
 optimizer_h5 = optim.SGD(model_h5.parameters(), lr=best_lr)
 
-history_h5 = train_model(
+history_h5, best_state_h5 = train_model(
     model_h5,
     train_loader,
     val_loader,
@@ -2066,7 +2010,9 @@ history_h5 = train_model(
     optimizer_h5,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h5.load_state_dict(best_state_h5)
 
 results_h5 = evaluate_model(
     model_h5,
@@ -2146,7 +2092,7 @@ run = wandb.init(
 model_h6 = BaseCNN(NUM_CLASSES).to(device)
 optimizer_h6 = optim.SGD(model_h6.parameters(), lr=best_lr)
 
-history_h6 = train_model(
+history_h6, best_state_h6 = train_model(
     model_h6,
     train_loader_strong,
     val_loader,
@@ -2154,7 +2100,9 @@ history_h6 = train_model(
     optimizer_h6,
     device,
     epochs=PHASE2_EPOCHS,
+    return_best_state=True,
 )
+model_h6.load_state_dict(best_state_h6)
 
 results_h6 = evaluate_model(
     model_h6,
@@ -2219,7 +2167,7 @@ for wd in weight_decays:
     model_h7 = BaseCNN(NUM_CLASSES).to(device)
     optimizer_h7 = optim.SGD(model_h7.parameters(), lr=best_lr, weight_decay=wd)
 
-    history_h7 = train_model(
+    history_h7, best_state_h7 = train_model(
         model_h7,
         train_loader,
         val_loader,
@@ -2227,7 +2175,9 @@ for wd in weight_decays:
         optimizer_h7,
         device,
         epochs=PHASE2_EPOCHS,
+        return_best_state=True,
     )
+    model_h7.load_state_dict(best_state_h7)
 
     results_h7 = evaluate_model(
         model_h7,
@@ -2347,7 +2297,7 @@ for bs in batch_sizes_bn:
     model_h8 = BatchNormCNN(NUM_CLASSES).to(device)
     optimizer_h8 = optim.SGD(model_h8.parameters(), lr=best_lr)
 
-    history_h8 = train_model(
+    history_h8, best_state_h8 = train_model(
         model_h8,
         bs_train_loader,
         bs_val_loader,
@@ -2355,7 +2305,9 @@ for bs in batch_sizes_bn:
         optimizer_h8,
         device,
         epochs=PHASE2_EPOCHS,
+        return_best_state=True,
     )
+    model_h8.load_state_dict(best_state_h8)
 
     results_h8 = evaluate_model(
         model_h8,
@@ -2465,7 +2417,7 @@ for scheme in init_schemes:
 
     optimizer_h9 = optim.SGD(model_h9.parameters(), lr=best_lr)
 
-    history_h9 = train_model(
+    history_h9, best_state_h9 = train_model(
         model_h9,
         train_loader,
         val_loader,
@@ -2473,7 +2425,9 @@ for scheme in init_schemes:
         optimizer_h9,
         device,
         epochs=PHASE2_EPOCHS,
+        return_best_state=True,
     )
+    model_h9.load_state_dict(best_state_h9)
 
     results_h9 = evaluate_model(
         model_h9,
@@ -2554,7 +2508,7 @@ for lr in adam_lrs:
     model_h10 = BaseCNN(NUM_CLASSES).to(device)
     optimizer_h10 = optim.Adam(model_h10.parameters(), lr=lr)
 
-    history_h10 = train_model(
+    history_h10, best_state_h10 = train_model(
         model_h10,
         train_loader,
         val_loader,
@@ -2562,7 +2516,9 @@ for lr in adam_lrs:
         optimizer_h10,
         device,
         epochs=PHASE2_EPOCHS,
+        return_best_state=True,
     )
+    model_h10.load_state_dict(best_state_h10)
 
     results_h10 = evaluate_model(
         model_h10,
@@ -2624,7 +2580,6 @@ Beide Varianten laufen über `PHASE2_EPOCHS` (=50), damit sie mit allen vorherig
 # H11: Transfer Learning mit ResNet18 (ImageNet pretrained)
 # Verwendet bewusst dieselbe 64x64-Eingabe und dieselben DataLoader wie die Baseline,
 # damit der Vergleich zu allen anderen Phase 2 Hypothesen fair bleibt.
-from torchvision.models import resnet18, ResNet18_Weights
 
 
 def build_resnet18(num_classes, freeze_backbone):
@@ -2680,7 +2635,7 @@ for name, freeze, lr in tl_configs:
 
     optimizer_h11 = optim.Adam(trainable_params, lr=lr)
 
-    history_h11 = train_model(
+    history_h11, best_state_h11 = train_model(
         model_h11,
         train_loader,
         val_loader,
@@ -2688,7 +2643,9 @@ for name, freeze, lr in tl_configs:
         optimizer_h11,
         device,
         epochs=PHASE2_EPOCHS,
+        return_best_state=True,
     )
+    model_h11.load_state_dict(best_state_h11)
 
     results_h11 = evaluate_model(
         model_h11,
@@ -2721,9 +2678,567 @@ best_tl_name = max(
     key=lambda n: max(history_h11_runs[n]["val_acc"]),
 )
 print(f"\nBeste Transfer Learning Variante: {best_tl_name}")
+
+# TODO Fazit schreiben.
 ```
 
 ### Analyse und Reflexion
 
 _Wird nach dem Lauf ergänzt._
+
+# Finales Modell — Hyperparameter-Sweep
+
+Aus den Hypothesen H1–H10 lassen sich zwei Klassen von Erkenntnissen ableiten: Architektur-Entscheidungen, die ich fix übernehme (z.B. BatchNorm, Adam, 4 Conv-Blöcke), und kontinuierliche Hyperparameter, deren Sweet Spot zwar grob bekannt ist, aber innerhalb einer Spannweite weiter variieren kann (Lernrate, Weight Decay, Dropout-Rate, Filterzahl, FC-Grösse, Augmentation-Stärke). Für die zweite Klasse läuft ein W&B Random Sweep mit 600 Runs über das Wochenende.
+
+Die gesamte Sweep-Logik ist in `src/sweep.py` ausgelagert und wurde übers Wochenende mit `caffeinate -i python sweep.py` durchgehend ausgeführt. So überlebt der Lauf einen Notebook-Restart, und das Notebook bleibt fokussiert auf Doku und Auswertung.
+
+## Setup
+
+### Fixierte Architektur (aus H1–H10 begründet)
+
+Die folgenden Entscheidungen werden **nicht** mitgesweept, weil die einschlägigen Hypothesen sie bereits klar entschieden haben:
+
+| Komponente | Wahl | Evidenz |
+|---|---|---|
+| Anzahl Conv-Blöcke | **4** (Filter verdoppeln pro Block) | H1: Peak besser, kleinerer Gap. H1 sagt explizit, dass die Tiefe ihr volles Potenzial erst mit BN+Adam zeigt — genau dieser Kombifall |
+| BatchNorm2d nach jedem Conv | **Ja** | H8: stärkste Einzelmassnahme (+2.49 pp Peak), Pflichtkomponente |
+| Kernel-Size | **3×3**, padding=1 | H3: 5×5 nur marginaler Peak-Gewinn |
+| Pooling | **MaxPool2d(2)** | H4: AvgPool verliert beim Peak |
+| Optimizer | **Adam** | H10: +2.49 pp, komplementär zu BN |
+| Weight-Init | **Default** (Kaiming Uniform) | H9: Default ausreichend |
+| Dropout-Position | FC-Layer nach ReLU | H5: klarer Regularisierer (+0.96 pp Peak) |
+| Augmentation-Pipeline | RandomResizedCrop + HFlip + ColorJitter + Rotation | H6: stabilste Regularisierung |
+| Checkpointing | Best-Val-Acc tracking via `val_acc_best` | H1, H3, H5: vermeidet "Last Epoch Problematik" |
+
+### Gesweepte Hyperparameter
+
+Die Distributionen orientieren sich an den Sweet Spots aus den Einzelhypothesen, sind aber bewusst breit gewählt, damit der Sweep auch nicht-intuitive Kombinationen entdecken kann:
+
+| Parameter | Verteilung | Range / Werte | Begründung |
+|---|---|---|---|
+| `lr` | log-uniform | `1e-4` – `3e-3` | H10 Sweet Spot 5e-4, log-zentriert |
+| `batch_size` | categorical | `{8, 16, 32, 64, 128, 256}` | H8: bs=32 mit BN optimal — mit Adam möglicherweise verschoben |
+| `weight_decay` | log-uniform | `1e-6` – `1e-2` | H7 Sweet Spot 5e-4, breiter Range |
+| `dropout_rate` | uniform | `0.1` – `0.9` | H5 nutzte 0.5; sehr hohe Rates testen, ob starke FC-Regularisierung mit BN+Augmentation lohnt |
+| `base_filters` | categorical | `{8, 16, 24, 32, 48, 64}` | H2: Breite hilft mit Regularisierung — komplette Spannweite |
+| `fc_hidden` | categorical | `{32, 64, 128, 256, 512}` | Baseline 128, FC-Kapazität breit testen |
+| `aug_color_jitter` | uniform | `0.0` – `0.3` | H6 |
+| `aug_rotation_deg` | categorical | `{0, 10, 15, 20}` | H6 |
+
+### Sweep-Konfiguration
+
+| Setting | Wert | Begründung |
+|---|---|---|
+| `method` | `random` | Die Hyperparameter werden Random zugewiesen. Ich habe bewusst nicht Bayesian Methode verwendet, da dies besser geeignet ist für wenig Parameter |
+| `metric.name` | `val_acc` (instant) | Hyperband nutzt diese Metrik an den Bracket-Epochen — `val_acc_best` wäre monoton steigend und würde overfittende Runs nicht killen |
+| `metric.goal` | `maximize` | Ziel der Challenge |
+| `epochs` pro Run | `50` | Identisch zu allen Phase-2-Hypothesen |
+| `early_terminate` | Hyperband, `min_iter=10`, `eta=3` | Stoppt schwache Runs nach mind. 10 Epochen, behält 1/3 |
+| `count` (Agent) | `600` | Übers Wochenende mit Hyperband-Termination |
+
+`val_acc_best` wird trotzdem pro Epoche geloggt und zusätzlich in `wandb.summary["val_acc_best"]` geschrieben, damit das finale Ranking unabhängig vom letzten Epoche-Wert bleibt (siehe Last-Epoch-Problematik aus H1, H3, H5).
+
+### Ausführung
+
+Folgendermassen wird der sweep gestartet über das Wochenende:
+
+```bash
+cd src && caffeinate -i python sweep.py
+```
+
+`caffeinate -i` verhindert den Idle-Sleep, solange der Prozess läuft. Mit 600 Runs × ~5–10 min und Hyperband-Termination passt der Lauf in 48 h.
+
+## Sweep-Ergebnisse
+
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/sweeps/oeiyw1i9" style="border:none;height:1024px;width:100%">
+
+### Top-Runs aus dem Sweep laden
+
+Die Sweep-API liefert alle 600 Runs. Wir ranken nach `summary.val_acc_best`, weil das die im Verlauf jedes Runs erreichte Peak-Accuracy ist. Der Top-Run liefert Architektur-Hyperparameter und Trainings-Hyperparameter für das finale Modell.
+
+```{python}
+# Lazy Fetching der Sweep-Daten von W&B mit lokalem Cache, damitFilterung und Sortierung instant erfolgen können.
+if SWEEP_CACHE.exists():
+    with open(SWEEP_CACHE, "rb") as f:
+        sweep_run_records = pickle.load(f)
+    print(f"Cache geladen: {len(sweep_run_records)} Runs aus {SWEEP_CACHE}")
+else:
+    print("Lade Runs von W&B (einmalig für 600 Runs)")
+    api = wandb.Api()
+    sweep = api.sweep(SWEEP_PATH)
+    sweep_run_records = [
+        {
+            "name": r.name,
+            "val_acc_best": r.summary.get("val_acc_best"),
+            "best_epoch": r.summary.get("best_epoch"),
+            "status": r.summary.get("status"),
+            "config": dict(r.config),
+        }
+        for r in sweep.runs
+    ]
+    SWEEP_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SWEEP_CACHE, "wb") as f:
+        pickle.dump(sweep_run_records, f)
+    print(f"Cache gespeichert: {SWEEP_CACHE}")
+
+# Filter und Sortierung erfolgen jetzt rein lokal -> instant.
+valid_runs = [
+    r
+    for r in sweep_run_records
+    if r["val_acc_best"] is not None and r["status"] != "failed"
+]
+valid_runs.sort(key=lambda r: r["val_acc_best"], reverse=True)
+
+print(
+    f"Insgesamt {len(sweep_run_records)} Runs, "
+    f"davon {len(valid_runs)} mit gueltigem Peak-Wert."
+)
+
+top_n = 10
+top_df = pd.DataFrame(
+    [
+        {
+            "name": r["name"],
+            "val_acc_best": r["val_acc_best"],
+            "best_epoch": r["best_epoch"],
+            "lr": r["config"].get("lr"),
+            "batch_size": r["config"].get("batch_size"),
+            "weight_decay": r["config"].get("weight_decay"),
+            "dropout_rate": r["config"].get("dropout_rate"),
+            "base_filters": r["config"].get("base_filters"),
+            "fc_hidden": r["config"].get("fc_hidden"),
+            "aug_color_jitter": r["config"].get("aug_color_jitter"),
+            "aug_rotation_deg": r["config"].get("aug_rotation_deg"),
+        }
+        for r in valid_runs[:top_n]
+    ]
+)
+print(f"\nTop {top_n} Runs nach val_acc_best:")
+print(top_df.to_string(index=False))
+```
+
+### Sensitivitätsanalyse — Winner's Curse vermeiden
+
+Bei 600 Random-Runs ist der absolute #1-Peak nach oben verzerrt (Multiple-Comparison-Bias): je mehr Runs, desto höher rückt das Maximum allein durch Trainings-Noise. Wir prüfen daher, ob die Top-1-Config zu einem **stabilen Plateau** in der Top-10 gehört oder ein einzelner Ausreißer ist.
+
+Konkret vergleichen wir das absolute Maximum mit dem Median der Top-10. Ist die Differenz klein, ist der Sweep-Peak repräsentativ für eine ganze Region guter Konfigurationen; ist sie groß, sollten wir den Re-Train-Erwartungswert deutlich unter dem Sweep-Peak ansetzen.
+
+```{python}
+all_val_acc = np.array(
+    [r["val_acc_best"] for r in sweep_run_records if r["val_acc_best"] is not None]
+)
+top10_vals = np.array([r["val_acc_best"] for r in valid_runs[:10]])
+
+stats = {
+    "n_runs": len(all_val_acc),
+    "max": float(all_val_acc.max()),
+    "top10_median": float(np.median(top10_vals)),
+    "top10_mean": float(top10_vals.mean()),
+    "top10_std": float(top10_vals.std(ddof=1)),
+    "top10_min": float(top10_vals.min()),
+    "delta_max_top10_median": float(all_val_acc.max() - np.median(top10_vals)),
+    "global_median": float(np.median(all_val_acc)),
+    "global_p90": float(np.percentile(all_val_acc, 90)),
+}
+for k, v in stats.items():
+    print(f"  {k:>26}: {v:.4f}" if isinstance(v, float) else f"  {k:>26}: {v}")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.hist(all_val_acc, bins=40, color="#90A4AE", alpha=0.7, edgecolor="white")
+ax.axvline(
+    stats["max"],
+    color="#D32F2F",
+    linestyle="--",
+    linewidth=2,
+    label=f"Top-1 = {stats['max']:.4f}",
+)
+ax.axvline(
+    top10_vals.min(),
+    color="#1976D2",
+    linestyle="--",
+    linewidth=2,
+    label=f"Top-10 Cutoff = {top10_vals.min():.4f}",
+)
+ax.axvline(
+    stats["top10_median"],
+    color="#388E3C",
+    linestyle="--",
+    linewidth=2,
+    label=f"Top-10 Median = {stats['top10_median']:.4f}",
+)
+ax.set_xlabel("val_acc_best")
+ax.set_ylabel("Anzahl Runs")
+ax.set_title(f"Verteilung val_acc_best ueber {len(all_val_acc)} Sweep-Runs")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+delta = stats["delta_max_top10_median"]
+if delta < 0.005:
+    plateau = "sehr eng (Plateau bestaetigt)"
+elif delta < 0.015:
+    plateau = "moderat (eher Plateau als Ausreisser)"
+else:
+    plateau = "weit (Top-1 koennte Ausreisser sein)"
+print(f"\nDelta Max <-> Top-10 Median: {delta*100:.2f} pp -> {plateau}")
+```
+
+### Streuung der Top-10 Hyperparameter
+
+Wir prüfen, ob die Top-10 Konfigurationen sich um die Top-1-Werte konzentrieren oder breit über den gesweepten Range verteilen. Konzentration → Sweet Spot bestätigt; Streuung → Modell wenig sensitiv für den Parameter, oder die Spitzenregion ist Sweep-Noise.
+
+Maße: Range (max − min), Coefficient of Variation (Std/Mean) für numerische Parameter; für kategorische Parameter zusätzlich der Modus (häufigster Wert in Top-10).
+
+```{python}
+top10_records = valid_runs[:10]
+numeric_params = ["lr", "weight_decay", "dropout_rate", "aug_color_jitter"]
+categorical_params = ["batch_size", "base_filters", "fc_hidden", "aug_rotation_deg"]
+
+rows = []
+for p in numeric_params:
+    vals = np.array([r["config"].get(p) for r in top10_records], dtype=float)
+    rows.append(
+        {
+            "parameter": p,
+            "min": vals.min(),
+            "median": float(np.median(vals)),
+            "max": vals.max(),
+            "mean": vals.mean(),
+            "std": vals.std(ddof=1),
+            "cv": vals.std(ddof=1) / abs(vals.mean()) if vals.mean() else float("nan"),
+            "mode": "-",
+        }
+    )
+for p in categorical_params:
+    vals = [r["config"].get(p) for r in top10_records]
+    vals_num = np.array(vals, dtype=float)
+    counts = pd.Series(vals).value_counts()
+    rows.append(
+        {
+            "parameter": p,
+            "min": vals_num.min(),
+            "median": float(np.median(vals_num)),
+            "max": vals_num.max(),
+            "mean": vals_num.mean(),
+            "std": vals_num.std(ddof=1),
+            "cv": (
+                vals_num.std(ddof=1) / abs(vals_num.mean())
+                if vals_num.mean()
+                else float("nan")
+            ),
+            "mode": f"{counts.index[0]} ({counts.iloc[0]}/10)",
+        }
+    )
+
+streuung_df = pd.DataFrame(rows)
+streuung_df_disp = streuung_df.copy()
+for c in ["min", "median", "max", "mean", "std", "cv"]:
+    streuung_df_disp[c] = streuung_df_disp[c].apply(lambda x: f"{x:.4g}")
+print("Top-10 Hyperparameter-Streuung:")
+print(streuung_df_disp.to_string(index=False))
+
+# Visuelle Streuung: Top-10 als horizontale Striche entlang des gesweepten Bereichs.
+fig, axes = plt.subplots(
+    len(numeric_params + categorical_params),
+    1,
+    figsize=(9, 1.4 * len(numeric_params + categorical_params)),
+    sharex=False,
+)
+for ax, p in zip(axes, numeric_params + categorical_params):
+    vals = [r["config"].get(p) for r in top10_records]
+    vals_num = np.array(vals, dtype=float)
+    use_log = p in ("lr", "weight_decay")
+    if use_log:
+        ax.set_xscale("log")
+    ax.scatter(vals_num, np.zeros_like(vals_num), s=80, alpha=0.6, color="#1976D2")
+    ax.scatter(
+        [vals_num[0]],
+        [0],
+        s=160,
+        color="#D32F2F",
+        zorder=5,
+        label=f"Top-1 = {vals_num[0]:.4g}",
+    )
+    ax.set_yticks([])
+    ax.set_xlabel(p)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3, axis="x")
+plt.tight_layout()
+plt.show()
+```
+
+### Fazit. 
+Die Architektur-Parameter batch_size=32 und base_filters=64 clustern klar (jeweils 6/10) — der Sweet Spot ist hier eindeutig bestätigt, und die Top-1-Wahl liegt in beiden Fällen auf dem Modus. dropout_rate konzentriert sich am unteren Rand (Median 0.18, Top-1 ebenfalls bei 0.18) und aug_rotation_deg bevorzugt 0° (6/10), was darauf hindeutet, dass BatchNorm + ColorJitter+HFlip+RandomResizedCrop bereits genug regularisieren. Demgegenüber streuen lr, weight_decay, fc_hidden und aug_color_jitter mit CV ≥ 0.5 über mehr als eine Größenordnung — das Modell ist gegenüber diesen Parametern in der gesweepten Bandbreite weitgehend insensitiv, der Top-1-Wert dort ist also nicht stark privilegiert.
+
+### Bester Run — Konfiguration
+
+```{python}
+best_run = valid_runs[0]
+best_config = best_run["config"]
+
+print(f"Bester Run: {best_run['name']}")
+print(f"Peak Val Acc: {best_run['val_acc_best']:.4f}")
+print(f"Best Epoche:  {best_run['best_epoch']}")
+print("\nHyperparameter:")
+for k, v in best_config.items():
+    if isinstance(v, float):
+        print(f"  {k:>20} = {v:.6g}")
+    else:
+        print(f"  {k:>20} = {v}")
+```
+
+## Finales Modell — Multi-Seed Re-Training
+
+Die Best-Config aus dem Sweep wird mit **drei Seeds** neu trainiert. Hintergrund: Der absolute #1-Run aus 600 Random-Runs unterliegt dem Multiple-Comparison-Bias und ist nach oben verzerrt. Ein einzelner Re-Train mit fixem Seed wäre wieder nur eine Punktschätzung — drei Seeds liefern Mittelwert ± Std und zeigen, wie viel des Sweep-Peaks reine Trainings-Varianz ist.
+
+Architektur und Hyperparameter sind in allen drei Seeds identisch zur Top-1-Config; nur der RNG-Seed (Modell-Init, Sample-Reihenfolge) variiert.
+
+```{python}
+class DeepBNCNN(nn.Module):
+    """4 Conv-Bloecke mit BN, MaxPool, 3x3 Kernel. FC mit Dropout. Aus H1-H10 abgeleitet."""
+
+    def __init__(
+        self, num_classes, base_filters, fc_hidden, dropout_rate, img_size=IMG_SIZE
+    ):
+        super().__init__()
+        c1, c2, c3, c4 = (
+            base_filters,
+            base_filters * 2,
+            base_filters * 4,
+            base_filters * 8,
+        )
+
+        self.features = nn.Sequential(
+            nn.Conv2d(3, c1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(c1, c2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(c2, c3, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c3),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(c3, c4, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c4),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+        feat_size = img_size // 16
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(c4 * feat_size * feat_size, fc_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(fc_hidden, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+```
+
+### Augmentation-Pipeline gemäss Best-Config
+
+```{python}
+final_train_transform = transforms.Compose(
+    [
+        transforms.RandomResizedCrop(IMG_SIZE, scale=(0.4, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(
+            brightness=best_config["aug_color_jitter"],
+            contrast=best_config["aug_color_jitter"],
+            saturation=best_config["aug_color_jitter"],
+        ),
+        transforms.RandomRotation(best_config["aug_rotation_deg"]),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=channel_mean.tolist(), std=channel_std.tolist()),
+    ]
+)
+
+final_train_dataset = IntelImageDataset(hf_train, transform=final_train_transform)
+final_train_loader = DataLoader(
+    final_train_dataset, batch_size=best_config["batch_size"], shuffle=True
+)
+final_val_loader = DataLoader(
+    val_dataset, batch_size=best_config["batch_size"], shuffle=False
+)
+```
+
+### Multi-Seed Training mit Best-Val-Acc-Checkpointing TODO: text anpassen: return_best_state wird nun überall verwendet
+
+Die Funktion `train_model` trägt seit dem Refactoring das Best-Val-Acc-Checkpointing intern (gibt bei `return_best_state=True` den State der Peak-Epoche zurück). Pro Seed wird ein eigener W&B-Run unter `group="final-multi-seed"` angelegt; **vor** `wandb.finish()` werden Confusion Matrix, Per-Class Precision/Recall/F1 und Top-Loss-Samples auf Validation **und** Test in den jeweiligen Run geloggt — dadurch sind alle Detail-Metriken pro Seed im W&B-Report verfügbar.
+
+```{python}
+# Test-Loader hier definieren (wird vom Multi-Seed-Loop fuer evaluate_model + evaluate genutzt).
+final_test_loader = DataLoader(
+    test_dataset, batch_size=best_config["batch_size"], shuffle=False
+)
+
+seed_results = {}
+
+for seed in SEEDS:
+    print(f"\n{'='*60}\nSeed {seed}\n{'='*60}")
+
+    run = wandb.init(
+        project="del-mini-challenge",
+        name=f"final-seed-{seed}",
+        group="final-multi-seed",
+        config={
+            **best_config,
+            "epochs": PHASE_FINAL_EPOCHS,
+            "seed": seed,
+            "experiment": "final-model-multi-seed",
+        },
+    )
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    model = DeepBNCNN(
+        num_classes=NUM_CLASSES,
+        base_filters=best_config["base_filters"],
+        fc_hidden=best_config["fc_hidden"],
+        dropout_rate=best_config["dropout_rate"],
+    ).to(device)
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=best_config["lr"],
+        weight_decay=best_config["weight_decay"],
+    )
+
+    history, best_state = train_model(
+        model,
+        final_train_loader,
+        final_val_loader,
+        criterion,
+        optimizer,
+        device,
+        epochs=PHASE_FINAL_EPOCHS,
+        log_wandb=True,
+        return_best_state=True,
+    )
+    model.load_state_dict(best_state)
+    best_val_acc = history["val_acc_best"][-1]
+    best_epoch = history["best_epoch"][-1]
+
+    # Per-Class Metriken auf Val + Test in den AKTIVEN Run loggen,
+    # bevor wandb.finish() aufgerufen wird (sonst landen sie nirgendwo).
+    print(f"\n--- Seed {seed}: Validation-Eval ---")
+    val_eval = evaluate_model(
+        model, final_val_loader, CLASS_NAMES, device, channel_mean, channel_std
+    )
+    print(f"\n--- Seed {seed}: Test-Eval ---")
+    test_eval = evaluate_model(
+        model, final_test_loader, CLASS_NAMES, device, channel_mean, channel_std
+    )
+    test_loss, test_acc = evaluate(model, final_test_loader, criterion, device)
+
+    wandb.summary["val_acc_best"] = best_val_acc
+    wandb.summary["best_epoch"] = best_epoch
+    wandb.summary["test_acc"] = test_acc
+    wandb.summary["test_loss"] = test_loss
+
+    wandb.finish()
+
+    seed_results[seed] = {
+        "model": model,
+        "history": history,
+        "val_acc_best": best_val_acc,
+        "best_epoch": best_epoch,
+        "test_acc": test_acc,
+        "test_loss": test_loss,
+        "val_eval": val_eval,
+        "test_eval": test_eval,
+    }
+    print(
+        f"\nSeed {seed} fertig — Peak Val Acc {best_val_acc:.4f}@{best_epoch} "
+        f"| Test Acc {test_acc:.4f}"
+    )
+```
+
+### Lernkurven (Best Seed)
+
+Die Lernkurven werden für den Seed mit der höchsten Peak-Val-Accuracy gezeigt; die anderen beiden Seeds sind im W&B-Group `final-multi-seed` einsehbar.
+
+```{python}
+best_seed = max(SEEDS, key=lambda s: seed_results[s]["val_acc_best"])
+print(
+    f"Bester Seed (nach val_acc_best): {best_seed} -> {seed_results[best_seed]['val_acc_best']:.4f}"
+)
+
+final_model = seed_results[best_seed]["model"]
+final_history = seed_results[best_seed]["history"]
+
+plot_training(final_history, title=f"Finales Modell — Lernkurven (Seed {best_seed})")
+```
+
+### Multi-Seed Auswertung
+
+Vergleich der drei Re-Trainings auf Validation und Test. Mittelwert ± Std liefert eine ehrlichere Punktschätzung als ein einzelner Run, weil Trainings-Noise (Init, Sample-Order, MPS-Nichtdeterminismus) ausgemittelt wird. Per-Class Metriken sind pro Seed im jeweiligen W&B-Run unter `eval/per_class_*` zu finden.
+
+```{python}
+seed_summary_df = pd.DataFrame(
+    [
+        {
+            "seed": s,
+            "best_epoch": seed_results[s]["best_epoch"],
+            "val_acc_best": seed_results[s]["val_acc_best"],
+            "test_acc": seed_results[s]["test_acc"],
+            "test_loss": seed_results[s]["test_loss"],
+        }
+        for s in SEEDS
+    ]
+)
+print("Multi-Seed Ergebnisse:")
+print(seed_summary_df.to_string(index=False))
+
+val_mean = seed_summary_df["val_acc_best"].mean()
+val_std = seed_summary_df["val_acc_best"].std(ddof=1)
+test_mean = seed_summary_df["test_acc"].mean()
+test_std = seed_summary_df["test_acc"].std(ddof=1)
+
+print(
+    f"\nVal Acc (peak):  {val_mean:.4f} +/- {val_std:.4f} "
+    f"(min {seed_summary_df['val_acc_best'].min():.4f}, "
+    f"max {seed_summary_df['val_acc_best'].max():.4f})"
+)
+print(
+    f"Test Acc:        {test_mean:.4f} +/- {test_std:.4f} "
+    f"(min {seed_summary_df['test_acc'].min():.4f}, "
+    f"max {seed_summary_df['test_acc'].max():.4f})"
+)
+print(f"\nSweep Top-1 Peak Val Acc: {best_run['val_acc_best']:.4f}")
+print(
+    f"Bias (Sweep - Multi-Seed Val): {(best_run['val_acc_best'] - val_mean)*100:+.2f} pp"
+)
+
+fig, ax = plt.subplots(figsize=(7, 5))
+metrics = ["Val Acc (peak)", "Test Acc"]
+means = [val_mean, test_mean]
+stds = [val_std, test_std]
+xs = np.arange(len(metrics))
+bars = ax.bar(xs, means, yerr=stds, capsize=8, color=["#2196F3", "#FF9800"], alpha=0.75)
+for s in SEEDS:
+    ax.scatter(0, seed_results[s]["val_acc_best"], color="black", zorder=5, s=40)
+    ax.scatter(1, seed_results[s]["test_acc"], color="black", zorder=5, s=40)
+ax.set_xticks(xs)
+ax.set_xticklabels(metrics)
+ax.set_ylabel("Accuracy")
+ax.set_title("Finales Modell — Multi-Seed Mean +/- Std")
+ax.grid(True, alpha=0.3, axis="y")
+for i, (m, s) in enumerate(zip(means, stds)):
+    ax.text(i, m + s + 0.005, f"{m:.4f}\n+/- {s:.4f}", ha="center", fontsize=9)
+plt.tight_layout()
+plt.show()
+```
+
+### Analyse und Reflexion
+
+_Wird nach dem Multi-Seed-Lauf ergänzt. Drei Punkte adressieren:_
+_- **Winner's Curse:** Differenz Sweep-Peak (Top-1) vs. Multi-Seed-Mittelwert; quantifiziert die Optimismus-Verzerrung der absoluten #1 aus 600 Random Runs._
+_- **Top-10 Streuung:** Welche Hyperparameter clustern (Sweet Spot bestätigt) vs. streuen breit (geringe Sensitivität oder Sweep-Noise)._
+_- **Statistische Unsicherheit:** Mittelwert ± Std über 3 Seeds für Validation und Test als realistische Punktschätzung des finalen Modells._
 
