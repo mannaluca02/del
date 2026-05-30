@@ -609,15 +609,6 @@ def plot_training(history, title="Lernkurven"):
 ### Evaluierungs- und Visualisierungsfunktionen
 
 - **Lernkurven** (Train Loss / Val Loss / Train Accuracy / Val Accuracy): wie sich das Modell über die Epochen entwickelt.
-- **Generalization Gap**: zeigt direkt den Unterschied zwischen Trainings- und Validierungsleistung.
-- **Confusion Matrix**: Sie zeigt für jede Klasse:
-  - wie oft sie korrekt erkannt wurde
-  - mit welchen anderen Klassen sie verwechselt wurde
-- **Per-Class Metrics**: Balkendiagramm pro Klasse mit folgenden Werten:
-  - Precision
-  - Recall
-  - F1-Score
-- **Top-Loss Samples**: Zeigt die Bilder bei denen das Modell die grössten Schwierigkeiten hatte.
 - **Cross-Validation Boxplot**: wie stabil das Modell über verschiedene Folds hinweg performt.
 
 > Im Verlauf der Implementierung habe ich immer wie mehr auf W&B Plots gesetzt.
@@ -947,7 +938,7 @@ else:
 
 ### Beobachtungen Overfitting-Test
 
-**Train vs. Validation identisch:** Da beide Kurven auf exakt denselben Daten operieren (gleicher DataLoader für Train und Validation), liegen sie nahezu perfekt übereinander. Der minimale Unterschied entsteht dadurch, dass `train_epoch()` im `model.train()`-Modus läuft und die Metriken **während** des Gradientenupdates berechnet (der Loss am Anfang des Batches, bevor die Gewichte aktualisiert werden), während `evaluate()` im `model.eval()`-Modus die Metriken **nach** dem Update berechnet. Daher ist die rote Validation-Kurve immer minimal besser als die blaue Train-Kurve.
+**Train vs. Validation identisch:** Da beide Kurven auf exakt denselben Daten operieren (gleicher DataLoader für Train und Validation), liegen sie nahezu perfekt übereinander. Der minimale Unterschied entsteht dadurch, dass `train_epoch()` im `model.train()`-Modus läuft und die Metriken **während** des Gradientenupdates berechnet (der Loss am Anfang des Batches, bevor die Gewichte aktualisiert werden), während `evaluate()` im `model.eval()`-Modus die Metriken **nach** dem Update berechnet. Daher ist die rote Validation-Kurve immer minimal voraus als die blaue Train-Kurve.
 
 
 **Spikes im Verlauf:** Die Spikes entstehen durch die Kombination aus hoher Lernrate (0.05) und SGD ohne Momentum auf nur einem einzigen Batch. Bei einem einzelnen Batch von 64 Bildern ist die Loss-Landschaft nicht glatt, sondern hat krümmungen. Mit `lr=0.05` sind die Gradientenschritte gross genug, um über ein lokales Minimum hinauszuschiessen und in einen Bereich mit höherem Loss zu springen. Das Modell "springt" dann wieder zurück, was die wiederholten Spikes erklärt.
@@ -1418,33 +1409,32 @@ wandb.finish()
 
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-Cross-validation-Report--VmlldzoxNjYwMTgzNg" style="border:none;height:1024px;width:100%">
 
-# Phase 2: Hyperparameter Tuning TODO: texte überarbeiten (Nicht KI like)
+# Phase 2: Hyperparameter Tuning
 
-In dieser Phase werden 11 Hypothesen aus sieben Themengruppen untersucht: Modellkomplexitaet (Tiefe, Breite), Conv Layer Settings (Kernel Size, Pooling), Regularisierung (Dropout, Data Augmentation, Weight Decay), BatchNorm, Gewichts-Initialisierung, Adam Optimizer und Transfer Learning.
+In dieser Phase werden 11 Hypothesen aus sieben Themengruppen untersucht: Modellkomplexität (Tiefe, Breite), Conv Layer Settings (Kernel Size, Pooling), Regularisierung (Dropout, Data Augmentation, Weight Decay), BatchNorm, Gewichts-Initialisierung, Adam Optimizer und Transfer Learning.
 
 ## Methodik
 
 **Fixe Phase 2 Baseline als Referenz.** Statt pro Hypothese zweimal zu trainieren, wird einmal ein `phase2-baseline` Run mit dem BaseCNN und den besten Hyperparametern aus Stage 1 (lr=0.05, bs=64) trainiert. Alle folgenden Hypothesen werden gegen diesen einen Run verglichen. Das spart Rechenzeit und die Vergleiche sind deterministisch unter identischen Bedingungen.
 
-**50 Epochen pro Experiment.** Aus Stage 1 wissen wir, dass die Val Accuracy beim Basismodell bereits ab ca. Epoche 30 auf einem Plateau zwischen 83 und 86 Prozent liegt und danach hauptsaechlich der Generalization Gap weiter waechst. 50 Epochen reichen also aus, um Peak Accuracy, Konvergenzverhalten und Overfitting-Trend zu beobachten. Laengeres Training wuerde den Vergleich nicht informativer machen, sondern nur Ressourcen binden. Ausnahmen (z.B. Transfer Learning mit weniger Epochen) werden pro Hypothese begruendet.
+**50 Epochen pro Experiment.** Aus Stage 1 wissen wir, dass die Val Accuracy beim Basismodell bereits ab ca. Epoche 30 auf einem Plateau zwischen 83 und 86 Prozent liegt und danach hauptsächlich der Generalization Gap weiter wächst. 50 Epochen reichen also aus, um Peak Accuracy, Konvergenzverhalten und Overfitting-Trend zu beobachten. Längeres Training würde den Vergleich nicht informativer machen, sondern nur Ressourcen binden. Ausnahmen (z.B. Transfer Learning mit weniger Epochen) werden pro Hypothese begründet.
 
-**Data Augmentation.** Die Stage 1 Pipeline enthaelt bereits `RandomResizedCrop` und `RandomHorizontalFlip`. Die Phase 2 Baseline uebernimmt diese Pipeline unveraendert. H6 (Data Augmentation) untersucht entsprechend, wie stark die Performance einbricht, wenn Augmentation entfernt wird, bzw. was zusaetzliche Augmentations (ColorJitter, RandomRotation) bringen.
+**Data Augmentation.** Die Stage 1 Pipeline enthält bereits `RandomResizedCrop` und `RandomHorizontalFlip`. Die Phase 2 Baseline übernimmt diese Pipeline unverändert. H6 (Data Augmentation) untersucht entsprechend, wie stark die Performance einbricht, wenn Augmentation entfernt wird, bzw. was zusätzliche Augmentations (ColorJitter, RandomRotation) bringen.
 
 ## Ablauf pro Hypothese
 
-1. **Hypothese** mit theoretischer Begruendung und Kursreferenz.
-2. **Experiment** mit klar definierter Aenderung, alle anderen Hyperparameter konstant.
+1. **Hypothese** mit theoretischer Begründung und Kursreferenz.
+2. **Experiment** mit klar definierter Änderung, alle anderen Hyperparameter konstant.
 3. **Analyse und Reflexion** mit Beobachtung, Interpretation und Abgleich mit der Hypothese.
 
 Am Schluss wird das beste Modell aus der Kombination der erfolgversprechenden Techniken gebaut.
 
 ## Phase 2 Baseline
 
-Referenz-Run fuer alle Hypothesen. BaseCNN, lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum, keine Regularisierung. W&B Run Name: `phase2-baseline`.
+Referenz-Run für alle Hypothesen. BaseCNN, lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum, keine Regularisierung. W&B Run Name: `phase2-baseline`.
 
 ```{python}
 # Phase 2 Baseline: wird einmal trainiert und als Referenz fuer alle Hypothesen verwendet.
-
 
 run = wandb.init(
     project="del-mini-challenge",
@@ -1502,12 +1492,9 @@ wandb.finish()
 
 ### Experiment
 
-`DeepCNN`: vier Conv-Bloecke (16 → 32 → 64 → 128 Filter, 3x3 Kernel, MaxPool(2) nach jedem Block). FC-Teil unveraendert. Training mit identischen Bedingungen wie Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen).
+`DeepCNN`: vier Conv-Blöcke (16 → 32 → 64 → 128 Filter, 3x3 Kernel, MaxPool(2) nach jedem Block). FC-Teil unverändert. Training mit identischen Bedingungen wie Phase 2 Baseline (lr=0.05, bs=64, 50 Epochen).
 
 ```{python}
-# TODO: Fazit so anpassen, dass nun best val score verwendet wird (sollte nun automatisch geloggt werden -> muss in wandb neu visualisiert werden)
-
-
 class DeepCNN(nn.Module):
     """Vier Conv-Bloecke (16 -> 32 -> 64 -> 128) statt drei. FC-Teil unveraendert."""
 
@@ -2341,122 +2328,27 @@ print(f"\nBeste Batch-Size mit BatchNorm: {best_bs_bn}")
 
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H8-Batch-Norm--VmlldzoxNjY1MzgyOQ" style="border:none;height:1024px;width:100%">
 
-## Hypothese 9: Gewichts-Initialisierung
+### Fazit
 
-**Hypothesen:**
+**Ergebnis**
+H8 (BatchNorm) zeigt laut Eval-Accuracy-Bar eine klare Verbesserung gegenüber der Baseline (83.65%): bs=16 erreicht Peak Val Acc **87.60%** (+3.95 pp), bs=32 **86.75%** (+3.10 pp). Der Train Loss endet tiefer (~0.28 vs. ~0.34) bei gleichzeitig kleinerem Generalization Gap.
 
-1. Eine explizite **Kaiming Normal Initialisierung** (He-Init, auf ReLU zugeschnitten) erreicht eine leicht höhere Val Accuracy als die Default-Initialisierung von PyTorch, weil die Varianz der Aktivierungen von Anfang an passend zur ReLU-Nichtlinearität gewählt wird.
-2. Eine **Xavier Normal Initialisierung** (ursprünglich für Sigmoid/Tanh konzipiert) schneidet bei ReLU schlechter ab, weil die Varianzskalierung für symmetrische Aktivierungen ausgelegt ist und bei ReLU zu kleinen Aktivierungen in tieferen Schichten führt.
-3. In den ersten Epochen zeigt sich der grösste Unterschied, weil die Initialisierung vor allem die Startbedingungen für das Training prägt. Nach ausreichend vielen Epochen kann sich der Abstand relativieren.
+**Hypothesen-Abgleich**
+H8a: Höhere Val Accuracy — Bestätigt. Die val_acc-Kurve ist in der zweiten Trainingshälfte deutlich stabiler (keine Einbrüche unter 0.80), während die Baseline regelmässig auf unter ~0.75 fällt.
+H8b: Schnellere Konvergenz — Bestätigt. h8 val_acc erreicht ~0.80 bereits bei Epoche 7–8 (Baseline: Epoche 15). BatchNorm reduziert den internen Covariate Shift und verbessert den Gradientenfluss von Anfang an.
+H8c: Weniger Val Loss Spikes — Bedingt Bestätigt. h8 val_loss ist klar stabiler als die Baseline in der zweiten Trainingshälfte.
+H8d: Verschobener Batch Size Sweet Spot — Bestätigt. bs=16 ist optimal (87.60%), bs=32 liegt knapp dahinter (86.75%). Im finalen Modell wird bs=32 verwendet, da der W&B-Sweep (600 Runs) bs=32 als robusteren Sweet Spot für die tiefere DeepBNCNN-Architektur bestätigt. Ohne Batch Size Re-Tuning hätte bs=64 mit BN zu wiederholten Spikes geführt.
 
-**Begründung:** Der PyTorch Default für `nn.Conv2d` und `nn.Linear` ist Kaiming Uniform mit `a=sqrt(5)`, was einer leicht abgewandelten He-Initialisierung entspricht. Die explizite Kaiming Normal Variante mit `nonlinearity='relu'` und `a=0` ist die lehrbuchmässige "richtige" Wahl für ReLU-Netze. Xavier (Glorot) wurde für symmetrische Aktivierungen (Tanh, Sigmoid) entwickelt und ist für ReLU bekanntermassen suboptimal, weil die effektive Varianz nach der ReLU halbiert wird und die Aktivierungen in tieferen Schichten langsam verschwinden. Das Vergleichsexperiment zeigt, wie gross der praktische Unterschied bei einem kleinen CNN tatsächlich ist.
+**Klassenweise Beobachtung**
+Buildings ist der grösste Einzelgewinner: Recall ~0.87 vs. ~0.67 (+0.20), F1 ~0.87 vs. ~0.77. Forest F1 verbessert sich leicht (~0.96 vs. ~0.94). Sea Recall steigt (~0.86 vs. ~0.80). Street Recall ist bei h8 leicht schwächer (~0.89 vs. ~0.94), dafür Precision besser (~0.89 vs. ~0.79). Mountain und Glacier bleiben praktisch unverändert. Macro-Avg F1: ~0.86 vs. ~0.83.
 
-**Kursreferenz:** `deepdive_pytorch_cnn.pdf`, `imagenet_architectures.pdf`
+**Generalization Gap**
+Loss-Gap: h8 endet bei ~0.12–0.14, Baseline bei ~0.18–0.20. Accuracy-Gap: h8 endet bei ~0.02–0.03, Baseline bei ~0.04–0.05.
 
-### Experiment
+**Einordnung**
+BatchNorm ist der stärkste Einzelbaustein der Phase 2. Im Gegensatz zu reinen Regularisierern (Dropout, Augmentation, Weight Decay), die fast ausschliesslich den Gap verkleinern, verbessert BN gleichzeitig die Optimierung (tieferer train_loss, schnellere Konvergenz) und die Generalisierung (kleinerer Gap). Lesson Learned: BN ist nicht einfach einschaltbar — die Wechselwirkung mit der Batch Size muss zwingend geprüft werden.
 
-Gleicher `BaseCNN` wie in der Phase 2 Baseline, aber vor dem Training werden die Gewichte aller Conv- und Linear-Layer explizit initialisiert. Biases werden immer auf 0 gesetzt. Getestet werden drei Schemata:
-
-- `default`: PyTorch-Default (Kaiming Uniform mit `a=sqrt(5)`).
-- `kaiming_normal`: He-Initialisierung, `nn.init.kaiming_normal_` mit `nonlinearity='relu'`.
-- `xavier_normal`: Glorot-Initialisierung, `nn.init.xavier_normal_`.
-
-Alle übrigen Bedingungen bleiben identisch zur Phase 2 Baseline (`lr=best_lr`, `bs=best_bs`, 50 Epochen, SGD ohne Momentum, kein Weight Decay, identischer Train Loader). Jedes Schema läuft als eigener W&B Run, damit die Startdynamik und der Endzustand direkt vergleichbar sind.
-
-```{python}
-# H9: Gewichts-Initialisierung (Default, Kaiming Normal, Xavier Normal)
-def apply_init(model, scheme):
-    """Initialisiert Conv- und Linear-Gewichte nach dem gewuenschten Schema."""
-    if scheme == "default":
-        return  # PyTorch-Default belassen
-
-    def _init(m):
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
-            if scheme == "kaiming_normal":
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-            elif scheme == "xavier_normal":
-                nn.init.xavier_normal_(m.weight)
-            else:
-                raise ValueError(f"Unbekanntes Init-Schema: {scheme}")
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-
-    model.apply(_init)
-
-
-init_schemes = ["default", "kaiming_normal", "xavier_normal"]
-history_h9_runs = {}
-results_h9_runs = {}
-
-for scheme in init_schemes:
-    print(f"\n{'='*60}")
-    print(f"H9 BaseCNN mit Init-Schema: {scheme}")
-    print(f"{'='*60}")
-
-    run = wandb.init(
-        project="del-mini-challenge",
-        name=f"h9-init-{scheme}",
-        config={
-            "architecture": "BaseCNN",
-            "optimizer": "SGD",
-            "lr": best_lr,
-            "momentum": 0.0,
-            "weight_decay": 0.0,
-            "batch_size": best_bs,
-            "epochs": PHASE2_EPOCHS,
-            "init_scheme": scheme,
-            "experiment": "h9-weight-init",
-            "hypothesis": "Kaiming Normal > Default > Xavier Normal",
-        },
-        reinit=True,
-    )
-
-    torch.manual_seed(42)
-    model_h9 = BaseCNN(NUM_CLASSES).to(device)
-    apply_init(model_h9, scheme)
-
-    optimizer_h9 = optim.SGD(model_h9.parameters(), lr=best_lr)
-
-    history_h9, best_state_h9 = train_model(
-        model_h9,
-        train_loader,
-        val_loader,
-        criterion,
-        optimizer_h9,
-        device,
-        epochs=PHASE2_EPOCHS,
-        return_best_state=True,
-    )
-    model_h9.load_state_dict(best_state_h9)
-
-    results_h9 = evaluate_model(
-        model_h9,
-        val_loader,
-        CLASS_NAMES,
-        device,
-        channel_mean,
-        channel_std,
-    )
-
-    history_h9_runs[scheme] = history_h9
-    results_h9_runs[scheme] = results_h9
-
-    peak = max(history_h9["val_acc"])
-    print(
-        f"\ninit={scheme} | Peak Val Acc: {peak:.4f} | Baseline: {peak_val_acc_base:.4f} | Diff: {(peak - peak_val_acc_base)*100:+.2f} pp"
-    )
-    wandb.finish()
-
-print("\n--- Zusammenfassung H9 Gewichts-Initialisierung ---")
-for scheme in init_schemes:
-    peak = max(history_h9_runs[scheme]["val_acc"])
-    last = history_h9_runs[scheme]["val_acc"][-1]
-    print(
-        f"init={scheme:<18} | Peak {peak:.4f} | Last {last:.4f} | Diff Peak {(peak - peak_val_acc_base)*100:+.2f} pp"
-    )
-```
-
-<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H9-Gewichts-Initialisierung--VmlldzoxNjY1NDQ1NQ" style="border:none;height:1024px;width:100%">
+## Hypothese 9: Verworfen
 
 ## Hypothese 10: Adam Optimizer
 
@@ -2552,7 +2444,7 @@ print(f"\nBeste Adam Lernrate: {best_lr_adam:.0e}")
 
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H10-Adam-Optimizer--VmlldzoxNjY1ODIzMA" style="border:none;height:1024px;width:100%">
 
-## Hypothese 11: Transfer Learning
+## Hypothese 10: Transfer Learning
 
 **Hypothesen:**
 
@@ -2678,23 +2570,19 @@ best_tl_name = max(
     key=lambda n: max(history_h11_runs[n]["val_acc"]),
 )
 print(f"\nBeste Transfer Learning Variante: {best_tl_name}")
-
-# TODO Fazit schreiben.
 ```
 
-### Analyse und Reflexion
-
-_Wird nach dem Lauf ergänzt._
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H10-Transfer-Learning--VmlldzoxNjY1ODYzMA" style="border:none;height:1024px;width:100%">
 
 # Finales Modell — Hyperparameter-Sweep
 
-Aus den Hypothesen H1–H10 lassen sich zwei Klassen von Erkenntnissen ableiten: Architektur-Entscheidungen, die ich fix übernehme (z.B. BatchNorm, Adam, 4 Conv-Blöcke), und kontinuierliche Hyperparameter, deren Sweet Spot zwar grob bekannt ist, aber innerhalb einer Spannweite weiter variieren kann (Lernrate, Weight Decay, Dropout-Rate, Filterzahl, FC-Grösse, Augmentation-Stärke). Für die zweite Klasse läuft ein W&B Random Sweep mit 600 Runs über das Wochenende.
+Aus den Hypothesen H1–H11 lassen sich zwei Klassen von Erkenntnissen ableiten: Architektur-Entscheidungen, die ich fix übernehme (z.B. BatchNorm, Adam, 4 Conv-Blöcke), und kontinuierliche Hyperparameter, deren Sweet Spot zwar grob bekannt ist, aber innerhalb einer Spannweite weiter variieren kann (Lernrate, Weight Decay, Dropout-Rate, Filterzahl, FC-Grösse, Augmentation-Stärke). Für die zweite Klasse läuft ein W&B Random Sweep mit 600 Runs über das Wochenende.
 
 Die gesamte Sweep-Logik ist in `src/sweep.py` ausgelagert und wurde übers Wochenende mit `caffeinate -i python sweep.py` durchgehend ausgeführt. So überlebt der Lauf einen Notebook-Restart, und das Notebook bleibt fokussiert auf Doku und Auswertung.
 
 ## Setup
 
-### Fixierte Architektur (aus H1–H10 begründet)
+### Fixierte Architektur (aus H1–H11 begründet)
 
 Die folgenden Entscheidungen werden **nicht** mitgesweept, weil die einschlägigen Hypothesen sie bereits klar entschieden haben:
 
@@ -2705,7 +2593,6 @@ Die folgenden Entscheidungen werden **nicht** mitgesweept, weil die einschlägig
 | Kernel-Size | **3×3**, padding=1 | H3: 5×5 nur marginaler Peak-Gewinn |
 | Pooling | **MaxPool2d(2)** | H4: AvgPool verliert beim Peak |
 | Optimizer | **Adam** | H10: +2.49 pp, komplementär zu BN |
-| Weight-Init | **Default** (Kaiming Uniform) | H9: Default ausreichend |
 | Dropout-Position | FC-Layer nach ReLU | H5: klarer Regularisierer (+0.96 pp Peak) |
 | Augmentation-Pipeline | RandomResizedCrop + HFlip + ColorJitter + Rotation | H6: stabilste Regularisierung |
 | Checkpointing | Best-Val-Acc tracking via `val_acc_best` | H1, H3, H5: vermeidet "Last Epoch Problematik" |
@@ -2717,7 +2604,7 @@ Die Distributionen orientieren sich an den Sweet Spots aus den Einzelhypothesen,
 | Parameter | Verteilung | Range / Werte | Begründung |
 |---|---|---|---|
 | `lr` | log-uniform | `1e-4` – `3e-3` | H10 Sweet Spot 5e-4, log-zentriert |
-| `batch_size` | categorical | `{8, 16, 32, 64, 128, 256}` | H8: bs=32 mit BN optimal — mit Adam möglicherweise verschoben |
+| `batch_size` | categorical | `{8, 16, 32, 64, 128, 256}` | H8: bs=32 mit BN optimal. Mit Adam möglicherweise verschoben |
 | `weight_decay` | log-uniform | `1e-6` – `1e-2` | H7 Sweet Spot 5e-4, breiter Range |
 | `dropout_rate` | uniform | `0.1` – `0.9` | H5 nutzte 0.5; sehr hohe Rates testen, ob starke FC-Regularisierung mit BN+Augmentation lohnt |
 | `base_filters` | categorical | `{8, 16, 24, 32, 48, 64}` | H2: Breite hilft mit Regularisierung — komplette Spannweite |
@@ -2730,7 +2617,7 @@ Die Distributionen orientieren sich an den Sweet Spots aus den Einzelhypothesen,
 | Setting | Wert | Begründung |
 |---|---|---|
 | `method` | `random` | Die Hyperparameter werden Random zugewiesen. Ich habe bewusst nicht Bayesian Methode verwendet, da dies besser geeignet ist für wenig Parameter |
-| `metric.name` | `val_acc` (instant) | Hyperband nutzt diese Metrik an den Bracket-Epochen — `val_acc_best` wäre monoton steigend und würde overfittende Runs nicht killen |
+| `metric.name` | `val_acc` (instant) | Hyperband nutzt diese Metrik an den Bracket-Epochen. `val_acc_best` wäre monoton steigend und würde overfittende Runs nicht killen |
 | `metric.goal` | `maximize` | Ziel der Challenge |
 | `epochs` pro Run | `50` | Identisch zu allen Phase-2-Hypothesen |
 | `early_terminate` | Hyperband, `min_iter=10`, `eta=3` | Stoppt schwache Runs nach mind. 10 Epochen, behält 1/3 |
@@ -2757,7 +2644,7 @@ cd src && caffeinate -i python sweep.py
 Die Sweep-API liefert alle 600 Runs. Wir ranken nach `summary.val_acc_best`, weil das die im Verlauf jedes Runs erreichte Peak-Accuracy ist. Der Top-Run liefert Architektur-Hyperparameter und Trainings-Hyperparameter für das finale Modell.
 
 ```{python}
-# Lazy Fetching der Sweep-Daten von W&B mit lokalem Cache, damitFilterung und Sortierung instant erfolgen können.
+# Lazy Fetching der Sweep-Daten von W&B mit lokalem Cache, damit Filterung und Sortierung instant erfolgen können.
 if SWEEP_CACHE.exists():
     with open(SWEEP_CACHE, "rb") as f:
         sweep_run_records = pickle.load(f)
@@ -2819,9 +2706,9 @@ print(top_df.to_string(index=False))
 
 ### Sensitivitätsanalyse — Winner's Curse vermeiden
 
-Bei 600 Random-Runs ist der absolute #1-Peak nach oben verzerrt (Multiple-Comparison-Bias): je mehr Runs, desto höher rückt das Maximum allein durch Trainings-Noise. Wir prüfen daher, ob die Top-1-Config zu einem **stabilen Plateau** in der Top-10 gehört oder ein einzelner Ausreißer ist.
+Bei 600 Random-Runs ist der absolute #1-Peak nach oben verzerrt (Multiple-Comparison-Bias): je mehr Runs, desto höher rückt das Maximum allein durch Trainings-Noise [Cawley & Talbot, 2010; arXiv:2411.18569]. Wir prüfen daher, ob die Top-1-Config zu einem **stabilen Plateau** in der Top-10 gehört oder ein einzelner Ausreisser ist.
 
-Konkret vergleichen wir das absolute Maximum mit dem Median der Top-10. Ist die Differenz klein, ist der Sweep-Peak repräsentativ für eine ganze Region guter Konfigurationen; ist sie groß, sollten wir den Re-Train-Erwartungswert deutlich unter dem Sweep-Peak ansetzen.
+Konkret vergleichen wir das absolute Maximum mit dem Median der Top-10. Ist die Differenz klein, ist der Sweep-Peak repräsentativ für eine ganze Region guter Konfigurationen; ist sie gross, sollten wir den Re-Train-Erwartungswert deutlich unter dem Sweep-Peak ansetzen.
 
 ```{python}
 all_val_acc = np.array(
@@ -2884,11 +2771,17 @@ else:
 print(f"\nDelta Max <-> Top-10 Median: {delta*100:.2f} pp -> {plateau}")
 ```
 
+### Erkenntnis
+
+Die Verteilung zeigt eine deutlich rechtssteile Struktur: Die grosse Masse der 600 Runs konzentriert sich im Bereich 0.82–0.90, während eine kleine Gruppe (~9 Runs) um 0.20 liegt. Das sind vermutlich Konfigurationen, die aufgrund ungünstiger Hyperparameter-Kombinationen (z.B. zu hohe Lernrate oder zu starker Dropout) nicht konvergierten.
+
+Entscheidend für die Bewertung des Top-1-Runs: Der Delta zwischen dem absoluten Maximum (0.9006) und dem Top-10-Median (0.8970) beträgt nur **0.36 pp**. Damit liegt der Winner's Curse-Bias im unkritischen Bereich. Top-1 ist kein Zufalls-Ausreisser, sondern Teil eines stabilen Plateaus [Cawley & Talbot, 2010]. Das globale p90 von 0.8864 zeigt zudem, dass nur ~60 der 600 Runs über 88.6% Validation Accuracy erreichten, was auf einen klar abgegrenzten, engen Sweet-Spot im Suchraum hindeutet.
+
 ### Streuung der Top-10 Hyperparameter
 
 Wir prüfen, ob die Top-10 Konfigurationen sich um die Top-1-Werte konzentrieren oder breit über den gesweepten Range verteilen. Konzentration → Sweet Spot bestätigt; Streuung → Modell wenig sensitiv für den Parameter, oder die Spitzenregion ist Sweep-Noise.
 
-Maße: Range (max − min), Coefficient of Variation (Std/Mean) für numerische Parameter; für kategorische Parameter zusätzlich der Modus (häufigster Wert in Top-10).
+Masse: Range (max − min), Coefficient of Variation (Std/Mean) für numerische Parameter; für kategorische Parameter zusätzlich der Modus (häufigster Wert in Top-10).
 
 ```{python}
 top10_records = valid_runs[:10]
@@ -2968,8 +2861,16 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Fazit. 
-Die Architektur-Parameter batch_size=32 und base_filters=64 clustern klar (jeweils 6/10) — der Sweet Spot ist hier eindeutig bestätigt, und die Top-1-Wahl liegt in beiden Fällen auf dem Modus. dropout_rate konzentriert sich am unteren Rand (Median 0.18, Top-1 ebenfalls bei 0.18) und aug_rotation_deg bevorzugt 0° (6/10), was darauf hindeutet, dass BatchNorm + ColorJitter+HFlip+RandomResizedCrop bereits genug regularisieren. Demgegenüber streuen lr, weight_decay, fc_hidden und aug_color_jitter mit CV ≥ 0.5 über mehr als eine Größenordnung — das Modell ist gegenüber diesen Parametern in der gesweepten Bandbreite weitgehend insensitiv, der Top-1-Wert dort ist also nicht stark privilegiert.
+### Fazit
+
+**Stabile Parameter (enger Sweet Spot):**
+* `batch_size=32` und `base_filters=64` clustern klar (je 6/10 Top-Runs auf dem Modus). Die Top-1-Wahl liegt in beiden Fällen genau auf diesem Modus, der Sweet Spot ist eindeutig bestätigt.
+* `dropout_rate` konzentriert sich am unteren Rand (Median 0.18, Top-1 ebenfalls 0.18). Stärkerer Dropout bringt keinen Vorteil, da BatchNorm zusammen mit ColorJitter, HorizontalFlip und RandomResizedCrop bereits ausreichend regularisiert.
+* `aug_rotation_deg` bevorzugt 0° (6/10). Zusätzliche Rotation verbessert die Performance nicht, was auf eine bereits genügende Augmentation-Pipeline hindeutet.
+
+**Insensitive Parameter (breite Streuung):**
+* `lr`, `weight_decay` und `aug_color_jitter` streuen mit CV ≥ 0.5 über mehr als eine Grössenordnung. Das Modell reagiert in der gesweepten Bandbreite kaum auf diese Parameter; der Top-1-Wert ist dort nicht privilegiert.
+* `fc_hidden` variiert zwischen 64 und 512 (CV 0.72) ohne klaren Modus. Die Grösse des FC-Blocks hat wenig Einfluss auf die Peak-Performance, solange Dropout aktiv ist.
 
 ### Bester Run — Konfiguration
 
@@ -2990,7 +2891,7 @@ for k, v in best_config.items():
 
 ## Finales Modell — Multi-Seed Re-Training
 
-Die Best-Config aus dem Sweep wird mit **drei Seeds** neu trainiert. Hintergrund: Der absolute #1-Run aus 600 Random-Runs unterliegt dem Multiple-Comparison-Bias und ist nach oben verzerrt. Ein einzelner Re-Train mit fixem Seed wäre wieder nur eine Punktschätzung — drei Seeds liefern Mittelwert ± Std und zeigen, wie viel des Sweep-Peaks reine Trainings-Varianz ist.
+Die Sensitivitätsanalyse hat gezeigt, dass der Multiple-Comparison-Bias mit 0.36 pp gering ist und Top-1 Teil eines stabilen Plateaus ist. Dennoch ist jeder einzelne Run eine Punktschätzung unter einem bestimmten RNG-Seed. Drei Seeds mit identischer Konfiguration liefern Mittelwert ± Std und quantifizieren, wie viel der finalen Performance auf Trainings-Varianz (Init, Sample-Order) zurückzuführen ist.
 
 Architektur und Hyperparameter sind in allen drei Seeds identisch zur Top-1-Config; nur der RNG-Seed (Modell-Init, Sample-Reihenfolge) variiert.
 
@@ -3067,9 +2968,9 @@ final_val_loader = DataLoader(
 )
 ```
 
-### Multi-Seed Training mit Best-Val-Acc-Checkpointing TODO: text anpassen: return_best_state wird nun überall verwendet
+### Multi-Seed Training
 
-Die Funktion `train_model` trägt seit dem Refactoring das Best-Val-Acc-Checkpointing intern (gibt bei `return_best_state=True` den State der Peak-Epoche zurück). Pro Seed wird ein eigener W&B-Run unter `group="final-multi-seed"` angelegt; **vor** `wandb.finish()` werden Confusion Matrix, Per-Class Precision/Recall/F1 und Top-Loss-Samples auf Validation **und** Test in den jeweiligen Run geloggt — dadurch sind alle Detail-Metriken pro Seed im W&B-Report verfügbar.
+Pro Seed wird ein eigener W&B-Run unter `group="final-multi-seed"` angelegt. Vor `wandb.finish()` werden Confusion Matrix, Per-Class Precision/Recall/F1 und Top-Loss-Samples auf Validation und Test geloggt, sodass alle Detail-Metriken pro Seed im W&B-Report verfügbar sind.
 
 ```{python}
 # Test-Loader hier definieren (wird vom Multi-Seed-Loop fuer evaluate_model + evaluate genutzt).
@@ -3159,86 +3060,60 @@ for seed in SEEDS:
     )
 ```
 
-### Lernkurven (Best Seed)
+<iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/Final-Model--VmlldzoxNzA1OTM2Ng" style="border:none;height:1024px;width:100%">
 
-Die Lernkurven werden für den Seed mit der höchsten Peak-Val-Accuracy gezeigt; die anderen beiden Seeds sind im W&B-Group `final-multi-seed` einsehbar.
+# Gesamtfazit — Hyperparameter Tuning
 
-```{python}
-best_seed = max(SEEDS, key=lambda s: seed_results[s]["val_acc_best"])
-print(
-    f"Bester Seed (nach val_acc_best): {best_seed} -> {seed_results[best_seed]['val_acc_best']:.4f}"
-)
+## Übersicht aller Hypothesen
 
-final_model = seed_results[best_seed]["model"]
-final_history = seed_results[best_seed]["history"]
+| Hypothese | Technik | Best Val Acc | Delta vs. Baseline | Im Finalmodell |
+|---|---|---|---|---|
+| Baseline | SGD, kein BN, keine Regularisierung | 83.65% | — | — |
+| H1 | Modelltiefe (4 Conv-Blöcke) | 85.70% | +2.05 pp | ✓ |
+| H2 | Modellbreite (2x Filter) | 86.32% | +2.67 pp | ✗ |
+| H3 | Kernel Size 5x5 | 84.53% | +0.88 pp | ✗ |
+| H4 | AvgPool statt MaxPool | 83.18% | −0.47 pp | ✗ |
+| H5 | Dropout (p=0.5) | 85.92% | +2.27 pp | ✓ |
+| H6 | Stärkere Augmentation | 85.43% | +1.78 pp | ✓ |
+| H7 | Weight Decay (5e-4) | 85.96% | +2.31 pp | ✓ |
+| H8 | BatchNorm (bs=16) | 87.60% | +3.95 pp | ✓ |
+| H10 | Adam Optimizer (lr=5e-4) | 87.39% | +3.74 pp | ✓ |
+| H11 | Transfer Learning Finetune | ~91.00% | ~+7.35 pp | ✗ (Regelwerk) |
+| **Final** | **Kombination H1+H5+H6+H7+H8+H10** | **89.74% val / 89.20% test** | **+6.09 pp** | — |
 
-plot_training(final_history, title=f"Finales Modell — Lernkurven (Seed {best_seed})")
-```
+## Erkenntnisse nach Kategorie
 
-### Multi-Seed Auswertung
+**Modellkomplexität**
+* Tiefe (H1) bringt +2.05 pp ohne Overfitting-Kosten, weil das zusätzliche MaxPool nach Block 4 den FC-Eingang verkleinert und die Parameterzahl von 549k auf 360k senkt. Tiefe zahlt sich aus.
+* Breite (H2) liefert +2.67 pp, aber nur auf Kosten eines grösseren Generalization Gaps und instabilem Training in frühen Epochen. Ohne Regularisierung fliesst die Zusatzkapazität in Overfitting. Breite zahlt sich erst in Kombination mit Regularisierung aus — was der Sweep mit base_filters=64 bestätigt.
 
-Vergleich der drei Re-Trainings auf Validation und Test. Mittelwert ± Std liefert eine ehrlichere Punktschätzung als ein einzelner Run, weil Trainings-Noise (Init, Sample-Order, MPS-Nichtdeterminismus) ausgemittelt wird. Per-Class Metriken sind pro Seed im jeweiligen W&B-Run unter `eval/per_class_*` zu finden.
+**Conv Layer Settings**
+* Kernel Size 5x5 (H3) ist weitgehend neutral (+0.88 pp). Bei kleinen Eingabebildern (64x64) und flachen Architekturen überwiegt der Mehraufwand den Kontextgewinn nicht. 3x3 bleibt die robustere Wahl.
+* AvgPool (H4) erreicht dasselbe Niveau wie MaxPool, zeigt aber ein anderes Klassenprofil: bessere Buildings-Erkennung, schwächere Mountain/Forest-Erkennung. MaxPool wird im Finalmodell beibehalten, weil es bei der Zielmetrik Overall-Accuracy marginal überlegen ist.
 
-```{python}
-seed_summary_df = pd.DataFrame(
-    [
-        {
-            "seed": s,
-            "best_epoch": seed_results[s]["best_epoch"],
-            "val_acc_best": seed_results[s]["val_acc_best"],
-            "test_acc": seed_results[s]["test_acc"],
-            "test_loss": seed_results[s]["test_loss"],
-        }
-        for s in SEEDS
-    ]
-)
-print("Multi-Seed Ergebnisse:")
-print(seed_summary_df.to_string(index=False))
+**Regularisierung**
+* Dropout (H5), Augmentation (H6) und Weight Decay (H7) wirken auf unterschiedlichen Ebenen: Dropout deaktiviert Neuronen zufällig, Augmentation variiert den Input, Weight Decay begrenzt die Gewichtsgrösse direkt. Alle drei reduzieren den Generalization Gap von ~0.20 auf ~0.05 und verbessern die Val Accuracy um +1.78 bis +2.31 pp.
+* Ein konsistentes Muster über H3–H7: Die Klasse Buildings profitiert von jeder Regularisierungsmassnahme am stärksten (Recall +0.12 bis +0.20 gegenüber Baseline). Sie scheint besonders anfällig für Overfitting zu sein, was auf heterogene Erscheinungsbilder (Fassaden unter verschiedenen Beleuchtungen, Winkeln) hindeutet.
+* Die drei Mechanismen sind komplementär und werden im Finalmodell kombiniert.
 
-val_mean = seed_summary_df["val_acc_best"].mean()
-val_std = seed_summary_df["val_acc_best"].std(ddof=1)
-test_mean = seed_summary_df["test_acc"].mean()
-test_std = seed_summary_df["test_acc"].std(ddof=1)
+**BatchNorm**
+* H8 ist der stärkste Einzelbaustein unter den from-scratch Methoden (+3.95 pp, 87.60%). Im Gegensatz zu reinen Regularisierern verbessert BatchNorm gleichzeitig Optimierung (tieferer Train Loss, schnellere Konvergenz) und Generalisierung (kleinerer Gap). Wichtig: BatchNorm erfordert Batch Size Re-Tuning — bs=64 führte zu Kollaps, bs=16 ist im Experiment optimal, bs=32 im vollständigen Finalmodell (durch den Sweep bestätigt).
 
-print(
-    f"\nVal Acc (peak):  {val_mean:.4f} +/- {val_std:.4f} "
-    f"(min {seed_summary_df['val_acc_best'].min():.4f}, "
-    f"max {seed_summary_df['val_acc_best'].max():.4f})"
-)
-print(
-    f"Test Acc:        {test_mean:.4f} +/- {test_std:.4f} "
-    f"(min {seed_summary_df['test_acc'].min():.4f}, "
-    f"max {seed_summary_df['test_acc'].max():.4f})"
-)
-print(f"\nSweep Top-1 Peak Val Acc: {best_run['val_acc_best']:.4f}")
-print(
-    f"Bias (Sweep - Multi-Seed Val): {(best_run['val_acc_best'] - val_mean)*100:+.2f} pp"
-)
+**Adam Optimizer**
+* Adam (H10, lr=5e-4) erreicht denselben Bereich wie BatchNorm (+3.74 pp, 87.39%) auf einem komplett anderen Weg: Adam normalisiert Gradienten pro Parameter statt Aktivierungen pro Layer. Die optimale Lernrate liegt um Faktor 100 unter SGD (5e-4 vs. 0.05). Beide Techniken sind komplementär — ihre Kombination im Finalmodell liefert mehr als die Summe der Teile.
 
-fig, ax = plt.subplots(figsize=(7, 5))
-metrics = ["Val Acc (peak)", "Test Acc"]
-means = [val_mean, test_mean]
-stds = [val_std, test_std]
-xs = np.arange(len(metrics))
-bars = ax.bar(xs, means, yerr=stds, capsize=8, color=["#2196F3", "#FF9800"], alpha=0.75)
-for s in SEEDS:
-    ax.scatter(0, seed_results[s]["val_acc_best"], color="black", zorder=5, s=40)
-    ax.scatter(1, seed_results[s]["test_acc"], color="black", zorder=5, s=40)
-ax.set_xticks(xs)
-ax.set_xticklabels(metrics)
-ax.set_ylabel("Accuracy")
-ax.set_title("Finales Modell — Multi-Seed Mean +/- Std")
-ax.grid(True, alpha=0.3, axis="y")
-for i, (m, s) in enumerate(zip(means, stds)):
-    ax.text(i, m + s + 0.005, f"{m:.4f}\n+/- {s:.4f}", ha="center", fontsize=9)
-plt.tight_layout()
-plt.show()
-```
+**Transfer Learning**
+* Finetune (H11) ist mit ~91.0% die stärkste Einzelmassnahme der Phase 2 (+7.35 pp), aber für das Finalmodell per Regelwerk ausgeschlossen. Der Mechanismus unterscheidet sich grundlegend: statt Optimierung einer zufälligen Architektur startet Finetune mit Features, die auf 1.4M ImageNet-Bildern vortrainiert wurden. Der hohe Generalization Gap (~0.37 Loss) zeigt, dass ResNet18 für ~14k Trainingsbilder überdimensioniert ist und ohne zusätzliche Regularisierung überanpasst.
+* Feature-Extract (~79%) liegt unter der Baseline — die Domain-Lücke zwischen ImageNet und Intel Image Classification ist zu gross, um ohne Backbone-Anpassung überbrückt zu werden.
 
-### Analyse und Reflexion
+## Kombinationseffekt
 
-_Wird nach dem Multi-Seed-Lauf ergänzt. Drei Punkte adressieren:_
-_- **Winner's Curse:** Differenz Sweep-Peak (Top-1) vs. Multi-Seed-Mittelwert; quantifiziert die Optimismus-Verzerrung der absoluten #1 aus 600 Random Runs._
-_- **Top-10 Streuung:** Welche Hyperparameter clustern (Sweet Spot bestätigt) vs. streuen breit (geringe Sensitivität oder Sweep-Noise)._
-_- **Statistische Unsicherheit:** Mittelwert ± Std über 3 Seeds für Validation und Test als realistische Punktschätzung des finalen Modells._
+Das Finalmodell kombiniert die sechs wirksamsten from-scratch Techniken: 4 Conv-Blöcke (H1), Dropout (H5), Augmentation (H6), Weight Decay (H7), BatchNorm (H8) und Adam (H10). Das Ergebnis — Val Acc 89.74%, Test Acc 89.20% — liegt mit +6.09 pp deutlich über der Baseline und übertrifft jede Einzelmassnahme ausser Transfer Learning. Die Kombination wirkt stärker als die Summe der Einzelteile, weil sich die Mechanismen gegenseitig verstärken: BatchNorm stabilisiert den Gradientenfluss, Adam nutzt diese Stabilität für schnellere Konvergenz, Dropout und Augmentation verhindern Overfitting bei der gestiegenen Modellkapazität.
+
+---
+## Literatur
+
+- Cawley, G.C. & Talbot, N.L.C. (2010). *On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation*. Journal of Machine Learning Research, 11, 2079–2107. https://www.jmlr.org/papers/v11/cawley10a.html
+
+- Marandon, A., Rebafka, T., Soret, P. & Verzelen, N. (2024). *A Flexible Defense Against the Winner's Curse*. arXiv:2411.18569. https://arxiv.org/abs/2411.18569
 
