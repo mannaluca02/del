@@ -141,7 +141,7 @@ plt.show()
 
 ### Fazit Klassenverteilung
 
-Sowohl das Train als auch das Test Datafram hat eine ausgewogene Klassenverteilung. Es benötigt keine Oversampling oder Undersampling einer Klasse.
+Sowohl das Train als auch das Test Dataframe hat eine ausgewogene Klassenverteilung. Es benötigt keine Oversampling oder Undersampling einer Klasse.
 
 - Train Dataset: 
   - Die `mountain` Klasse hat am meisten Vorkommnisse mit knapp unter 2500 Bilder. 
@@ -178,7 +178,7 @@ plt.show()
 
 Meine vorhersage für die Modelle ist: 
 - Die Klasse `forest` wird wahrscheinlich am einfachstenzu unterscheiden sein: Vertikale kanten und grün dominant. 
-- Die Klassen `buildings` und `street` könnten Problematisch zu unterscheiden sein. Bei dem ersten Beispielbild von `street` sieht man auch Gebäude was schwer zu unterscheiden sein kann für das Modell.
+- Die Klassen `buildings` und `street` könnten Problematisch zu unterscheiden sein. Bei dem ersten Beispielbild von `street` sieht man auch Gebäude. Dies kann schwer zu unterscheiden sein kann für das Modell.
 - Auch die Klassen `glacier` und `mountain` können schwer vorhersagbar sein für das Modell, da bei den `glacier` Beispielbildern auch Berge zu sehen sind. 
 - Bei dem ersten Beispielbild von `sea` und `building` ist zu erkennen, dass der Datensatz auch Schwarz-Weiss Bilder enthält. Das Modell kann sich somit nicht lediglich auf die Farbkanäle verlassen. 
 
@@ -279,7 +279,7 @@ for class_name, data in summary.items():
 
 **Implikationen für das Modell:**
 
-1. **Farbinformation ist notwendig, aber nicht hinreichend.** Während `Forest` anhand der Farbverteilung gut trennbar ist, muss das CNN für die Unterscheidung von Glacier/Mountain/Sea auf **Textur- und Strukturmerkmale** (Kanten, Muster, räumliche Frequenzen) zurückgreifen. Dies muss anhand der Convulutional Layern entnommen werden
+1. **Farbinformation ist notwendig, aber nicht hinreichend.** Während `forest` anhand der Farbverteilung gut trennbar ist, muss das CNN für die Unterscheidung von Glacier/Mountain/Sea auf **Textur- und Strukturmerkmale** (Kanten, Muster, räumliche Frequenzen) zurückgreifen. Dies muss anhand der Convulutional Layern entnommen werden
 2. **Normalisierung ist wichtig.** Die Mittelwerte weichen deutlich von 128 (Mitte des [0, 255]-Bereichs) ab und unterscheiden sich zwischen den Kanälen. Eine kanalweise Normalisierung hilft dem Modell, schneller zu konvergieren, da die Eingabedaten zentriert und skaliert werden.
 
 ## Preprocessing
@@ -302,7 +302,7 @@ train_indices, val_indices = train_test_split(
     stratify=dataset["train"]["label"],
 )
 
-# Kanal-Mittelwerte und Standardabweichungen NUR über den Train-Split berechnen
+# Kanal-Mittelwerte und Standardabweichungen nur über den Train-Split berechnen
 # Validation- und Test-Daten dürfen nicht einfliessen (Data Leakage)
 channel_sum = np.zeros(3)
 channel_sq_sum = np.zeros(3)
@@ -1432,6 +1432,8 @@ Am Schluss wird das beste Modell aus der Kombination der erfolgversprechenden Te
 ## Phase 2 Baseline
 
 Referenz-Run für alle Hypothesen. BaseCNN, lr=0.05, bs=64, 50 Epochen, SGD ohne Momentum, keine Regularisierung. W&B Run Name: `phase2-baseline`.
+
+Es werden immer die Werte von dem Baseline Modell verwendet für die Vergleiche. Ausser es wird explizit genannt, dass die Werte von dem 5-fachen-CV verwendet wird. 
 
 ```{python}
 # Phase 2 Baseline: wird einmal trainiert und als Referenz fuer alle Hypothesen verwendet.
@@ -3062,53 +3064,53 @@ for seed in SEEDS:
 
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/Final-Model--VmlldzoxNzA1OTM2Ng" style="border:none;height:1024px;width:100%">
 
-# Gesamtfazit — Hyperparameter Tuning
+# Gesamtfazit: Hyperparameter Tuning
 
 ## Übersicht aller Hypothesen
 
 | Hypothese | Technik | Best Val Acc | Delta vs. Baseline | Im Finalmodell |
 |---|---|---|---|---|
-| Baseline | SGD, kein BN, keine Regularisierung | 83.65% | — | — |
-| H1 | Modelltiefe (4 Conv-Blöcke) | 85.70% | +2.05 pp | ✓ |
-| H2 | Modellbreite (2x Filter) | 86.32% | +2.67 pp | ✗ |
-| H3 | Kernel Size 5x5 | 84.53% | +0.88 pp | ✗ |
-| H4 | AvgPool statt MaxPool | 83.18% | −0.47 pp | ✗ |
-| H5 | Dropout (p=0.5) | 85.92% | +2.27 pp | ✓ |
-| H6 | Stärkere Augmentation | 85.43% | +1.78 pp | ✓ |
-| H7 | Weight Decay (5e-4) | 85.96% | +2.31 pp | ✓ |
-| H8 | BatchNorm (bs=16) | 87.60% | +3.95 pp | ✓ |
-| H10 | Adam Optimizer (lr=5e-4) | 87.39% | +3.74 pp | ✓ |
-| H11 | Transfer Learning Finetune | ~91.00% | ~+7.35 pp | ✗ (Regelwerk) |
-| **Final** | **Kombination H1+H5+H6+H7+H8+H10** | **89.74% val / 89.20% test** | **+6.09 pp** | — |
+| Baseline | SGD, kein BN, keine Regularisierung | 84.89% | — | — |
+| H1 | Modelltiefe (4 Conv-Blöcke) | 85.70% | +0.81 pp | ✓ |
+| H2 | Modellbreite (2× Filter) | 86.32% | +1.43 pp | ✓ (4× im Sweep) |
+| H3 | Kernel Size 5×5 | 84.53% | −0.36 pp | ✗ |
+| H4 | AvgPool statt MaxPool | 83.18% | −1.71 pp | ✗ |
+| H5 | Dropout (p=0.5) | 85.92% | +1.03 pp | ✓ |
+| H6 | Stärkere Augmentation | 85.43% | +0.54 pp | ✓ |
+| H7 | Weight Decay (5e-4) | 85.96% | +1.07 pp | ✓ |
+| H8 | BatchNorm (bs=16) | 87.60% | +2.71 pp | ✓ |
+| H10 | Adam Optimizer (lr=5e-4) | 87.39% | +2.50 pp | ✓ |
+| H11 | Transfer Learning Finetune | ~91.00% | ~+6.11 pp | ✗ (Regelwerk) |
+| **Final** | **Kombination H1+H2+H5+H6+H7+H8+H10** | **89.74% val / 89.20% test** | **+4.85 pp** | — |
 
 ## Erkenntnisse nach Kategorie
 
 **Modellkomplexität**
-* Tiefe (H1) bringt +2.05 pp ohne Overfitting-Kosten, weil das zusätzliche MaxPool nach Block 4 den FC-Eingang verkleinert und die Parameterzahl von 549k auf 360k senkt. Tiefe zahlt sich aus.
-* Breite (H2) liefert +2.67 pp, aber nur auf Kosten eines grösseren Generalization Gaps und instabilem Training in frühen Epochen. Ohne Regularisierung fliesst die Zusatzkapazität in Overfitting. Breite zahlt sich erst in Kombination mit Regularisierung aus — was der Sweep mit base_filters=64 bestätigt.
+* Tiefe (H1) bringt +0.81 pp ohne Mehrkosten durch Overfitting, weil das zusätzliche MaxPool nach Block 4 den FC-Eingang verkleinert und die Parameterzahl von 549k auf 360k senkt.
+* Breite (H2) liefert als isoliertes Experiment +1.43 pp, jedoch mit grösserem Generalization Gap und instabilem Training in frühen Epochen. Ohne Regularisierung fliesst die Zusatzkapazität in Overfitting. Der Sweep bestätigt base_filters=64 als optimalen Sweet Spot, was einer 4× Verbreiterung gegenüber der Baseline entspricht. Breite zahlt sich also erst in Kombination mit Regularisierung aus.
 
 **Conv Layer Settings**
-* Kernel Size 5x5 (H3) ist weitgehend neutral (+0.88 pp). Bei kleinen Eingabebildern (64x64) und flachen Architekturen überwiegt der Mehraufwand den Kontextgewinn nicht. 3x3 bleibt die robustere Wahl.
-* AvgPool (H4) erreicht dasselbe Niveau wie MaxPool, zeigt aber ein anderes Klassenprofil: bessere Buildings-Erkennung, schwächere Mountain/Forest-Erkennung. MaxPool wird im Finalmodell beibehalten, weil es bei der Zielmetrik Overall-Accuracy marginal überlegen ist.
+* Kernel Size 5×5 (H3) bringt −0.36 pp. Bei kleinen Eingabebildern (64×64) und flachen Architekturen überwiegt der Mehraufwand den Kontextgewinn nicht. 3×3 bleibt die robustere Wahl.
+* AvgPool (H4) liegt −1.71 pp unter der Baseline und zeigt ein anderes Klassenprofil: bessere Buildings Erkennung, schwächere Mountain und Forest Erkennung. MaxPool wird im Finalmodell beibehalten, weil es bei der Zielmetrik Overall Accuracy überlegen ist.
 
 **Regularisierung**
-* Dropout (H5), Augmentation (H6) und Weight Decay (H7) wirken auf unterschiedlichen Ebenen: Dropout deaktiviert Neuronen zufällig, Augmentation variiert den Input, Weight Decay begrenzt die Gewichtsgrösse direkt. Alle drei reduzieren den Generalization Gap von ~0.20 auf ~0.05 und verbessern die Val Accuracy um +1.78 bis +2.31 pp.
-* Ein konsistentes Muster über H3–H7: Die Klasse Buildings profitiert von jeder Regularisierungsmassnahme am stärksten (Recall +0.12 bis +0.20 gegenüber Baseline). Sie scheint besonders anfällig für Overfitting zu sein, was auf heterogene Erscheinungsbilder (Fassaden unter verschiedenen Beleuchtungen, Winkeln) hindeutet.
+* Dropout (H5), Augmentation (H6) und Weight Decay (H7) wirken auf unterschiedlichen Ebenen: Dropout deaktiviert Neuronen zufällig, Augmentation variiert den Input, Weight Decay begrenzt die Gewichtsgrösse direkt. Alle drei verbessern die Val Accuracy um +0.54 bis +1.07 pp und reduzieren den Generalization Gap von ~0.20 auf ~0.05.
+* Ein konsistentes Muster: Die Klasse Buildings profitiert von jeder Regularisierungsmassnahme am stärksten. Sie scheint besonders anfällig für Overfitting zu sein, was auf heterogene Erscheinungsbilder (Fassaden unter verschiedenen Beleuchtungen, Winkeln) hindeutet.
 * Die drei Mechanismen sind komplementär und werden im Finalmodell kombiniert.
 
 **BatchNorm**
-* H8 ist der stärkste Einzelbaustein unter den from-scratch Methoden (+3.95 pp, 87.60%). Im Gegensatz zu reinen Regularisierern verbessert BatchNorm gleichzeitig Optimierung (tieferer Train Loss, schnellere Konvergenz) und Generalisierung (kleinerer Gap). Wichtig: BatchNorm erfordert Batch Size Re-Tuning — bs=64 führte zu Kollaps, bs=16 ist im Experiment optimal, bs=32 im vollständigen Finalmodell (durch den Sweep bestätigt).
+* H8 ist der stärkste Einzelbaustein unter den eigenständig trainierten Methoden (+2.71 pp, 87.60%). Im Gegensatz zu reinen Regularisierern verbessert BatchNorm gleichzeitig Optimierung (tieferer Train Loss, schnellere Konvergenz) und Generalisierung (kleinerer Gap). Wichtig: BatchNorm erfordert eine Batch Size Anpassung. bs=64 führte zu Trainingskollaps, bs=16 ist im isolierten Experiment optimal, bs=32 im vollständigen Finalmodell (durch den Sweep bestätigt).
 
 **Adam Optimizer**
-* Adam (H10, lr=5e-4) erreicht denselben Bereich wie BatchNorm (+3.74 pp, 87.39%) auf einem komplett anderen Weg: Adam normalisiert Gradienten pro Parameter statt Aktivierungen pro Layer. Die optimale Lernrate liegt um Faktor 100 unter SGD (5e-4 vs. 0.05). Beide Techniken sind komplementär — ihre Kombination im Finalmodell liefert mehr als die Summe der Teile.
+* Adam (H10, lr=5e-4) erreicht mit +2.50 pp (87.39%) denselben Bereich wie BatchNorm auf einem komplett anderen Weg: Adam passt die Lernrate pro Parameter adaptiv an, statt Aktivierungen zu normalisieren. Die optimale Lernrate liegt um Faktor 100 unter SGD (5e-4 vs. 0.05). Beide Techniken sind komplementär und ihre Kombination im Finalmodell liefert mehr als die Summe der Einzelteile.
 
 **Transfer Learning**
-* Finetune (H11) ist mit ~91.0% die stärkste Einzelmassnahme der Phase 2 (+7.35 pp), aber für das Finalmodell per Regelwerk ausgeschlossen. Der Mechanismus unterscheidet sich grundlegend: statt Optimierung einer zufälligen Architektur startet Finetune mit Features, die auf 1.4M ImageNet-Bildern vortrainiert wurden. Der hohe Generalization Gap (~0.37 Loss) zeigt, dass ResNet18 für ~14k Trainingsbilder überdimensioniert ist und ohne zusätzliche Regularisierung überanpasst.
-* Feature-Extract (~79%) liegt unter der Baseline — die Domain-Lücke zwischen ImageNet und Intel Image Classification ist zu gross, um ohne Backbone-Anpassung überbrückt zu werden.
+* Finetune (H11) ist mit ~91.0% die stärkste Einzelmassnahme (+6.11 pp), aber per Regelwerk für das Finalmodell ausgeschlossen. Der Mechanismus unterscheidet sich grundlegend: statt Optimierung einer zufälligen Architektur startet Finetune mit Features, die auf 1.4M ImageNet-Bildern vortrainiert wurden. Der hohe Generalization Gap (~0.37 Loss) zeigt, dass ResNet18 für ~14k Trainingsbilder überdimensioniert ist und ohne zusätzliche Regularisierung überanpasst.
+* Feature Extract (~79%) liegt deutlich unter der Baseline. Die Domain Lücke zwischen ImageNet und Intel Image Classification ist zu gross, um ohne Backbone Anpassung überbrückt zu werden.
 
 ## Kombinationseffekt
 
-Das Finalmodell kombiniert die sechs wirksamsten from-scratch Techniken: 4 Conv-Blöcke (H1), Dropout (H5), Augmentation (H6), Weight Decay (H7), BatchNorm (H8) und Adam (H10). Das Ergebnis — Val Acc 89.74%, Test Acc 89.20% — liegt mit +6.09 pp deutlich über der Baseline und übertrifft jede Einzelmassnahme ausser Transfer Learning. Die Kombination wirkt stärker als die Summe der Einzelteile, weil sich die Mechanismen gegenseitig verstärken: BatchNorm stabilisiert den Gradientenfluss, Adam nutzt diese Stabilität für schnellere Konvergenz, Dropout und Augmentation verhindern Overfitting bei der gestiegenen Modellkapazität.
+Das Finalmodell kombiniert die sieben wirksamsten eigenständig trainierten Techniken: 4 Conv Blöcke (H1), Breite 4× (H2 via Sweep), Dropout (H5), Augmentation (H6), Weight Decay (H7), BatchNorm (H8) und Adam (H10). Das Ergebnis (Val Acc 89.74%, Test Acc 89.20%) liegt mit +4.85 pp über der Baseline und übertrifft jede Einzelmassnahme ausser Transfer Learning. Die Kombination wirkt stärker als die Summe der Einzelteile, weil sich die Mechanismen gegenseitig verstärken: BatchNorm stabilisiert den Gradientenfluss, Adam nutzt diese Stabilität für schnellere Konvergenz, Dropout und Augmentation verhindern Overfitting bei der gestiegenen Modellkapazität.
 
 ---
 ## Literatur
