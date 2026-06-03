@@ -2352,6 +2352,8 @@ BatchNorm ist der stärkste Einzelbaustein der Phase 2. Im Gegensatz zu reinen R
 
 ## Hypothese 9: Verworfen
 
+Geplant war ein Vergleich der Gewichts-Initialisierung (Kaiming vs. Xavier vs. PyTorch Default). PyTorch nutzt bei `nn.Conv2d` und `nn.Linear` jedoch bereits Kaiming Uniform als Default, sodass kein messbarer Effekt gegenüber Xavier zu erwarten war. 
+
 ## Hypothese 10: Adam Optimizer
 
 **Hypothesen:**
@@ -2446,7 +2448,7 @@ print(f"\nBeste Adam Lernrate: {best_lr_adam:.0e}")
 
 <iframe src="https://wandb.ai/mannaluca02-fachhochschule-nordwestschweiz-fhnw/del-mini-challenge/reports/DEL-H10-Adam-Optimizer--VmlldzoxNjY1ODIzMA" style="border:none;height:1024px;width:100%">
 
-## Hypothese 10: Transfer Learning
+## Hypothese 11: Transfer Learning
 
 **Hypothesen:**
 
@@ -3114,6 +3116,8 @@ Das Finalmodell kombiniert die sieben wirksamsten eigenständig trainierten Tech
 
 ---
 ## Literatur
+
+- Bayle, P., Bayle, A., Janson, L. & Mackey, L. (2020). *Cross-validation Confidence Intervals for Test Error*. Advances in Neural Information Processing Systems 33 (NeurIPS 2020). https://arxiv.org/abs/2007.12671
 
 - Cawley, G.C. & Talbot, N.L.C. (2010). *On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation*. Journal of Machine Learning Research, 11, 2079–2107. https://www.jmlr.org/papers/v11/cawley10a.html
 
